@@ -1,0 +1,706 @@
+name: Build APK
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ĐÃ SỬA (2026-07-27): trước đây dùng `channel: stable` — nghĩa là MỖI
+      # LẦN chạy workflow, Actions tải bản Flutter "stable" MỚI NHẤT TẠI ĐÚNG
+      # THỜI ĐIỂM ĐÓ, không phải cùng 1 bản như lần build trước. Đây là
+      # nguyên nhân gốc khiến cùng 1 bộ source code (không đổi dòng nào) có
+      # thể build được ở lần này nhưng lỗi ở lần khác — không phải trùng hợp,
+      # mà là hệ quả tất yếu của việc không pin version.
+      #
+      # QUAN TRỌNG - MINH BẠCH: con số 3.44.7 dưới đây là bản Flutter stable
+      # mới nhất tại thời điểm sửa file này (tra cứu thật từ docs.flutter.dev,
+      # không phải đoán) — KHÔNG có cách nào xác nhận đây có đúng là bản đã
+      # từng build thành công trước đó hay không, vì tài liệu kỹ thuật của dự
+      # án chưa từng ghi lại con số đó. Tác dụng thật của việc pin này là:
+      # TỪ BÂY GIỜ TRỞ ĐI, mọi lần build đều dùng đúng 1 bản Flutter, không
+      # còn trôi theo ngày giờ chạy nữa — nếu build lần này thành công, hãy
+      # GIỮ NGUYÊN con số này, không đổi, trừ khi chủ động muốn nâng cấp.
+      # ĐÃ THÊM: cache: true / pub-cache: true — tham số CHÍNH THỨC của
+      # action này (xem README github.com/subosito/flutter-action), tự
+      # cache cả bản SDK Flutter đã tải VÀ các gói pub đã tải (khớp theo
+      # pubspec.lock) — vì flutter-version đã ghim cố định '3.44.7', cache
+      # SDK gần như luôn trúng; phần pub-cache còn phụ thuộc pubspec.lock
+      # có đổi giữa các lần build hay không.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: 'stable'
+          cache: true
+          pub-cache: true
+
+      - name: Cài NDK mới nhất có sẵn (bản cũ không hỗ trợ SVE2/KleidiAI)
+        run: |
+          NEWEST_NDK=$(yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --list 2>/dev/null | grep -oE "ndk;[0-9.]+" | sort -t';' -k2 -V | tail -1)
+          echo "Dùng NDK: $NEWEST_NDK"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "$NEWEST_NDK"
+          NDK_VERSION=$(echo "$NEWEST_NDK" | cut -d';' -f2)
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+
+      - name: Tăng bộ nhớ ảo để tránh hết RAM khi build C++ nặng
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Giải nén code Flutter đã upload
+        run: unzip local_novel.zip -d extracted
+
+      - name: Sinh khung project Flutter đầy đủ (android/, ios/...)
+        run: flutter create --org com.localnovel --project-name local_novel scaffold
+
+      # ĐÃ THÊM (2026-07-27, lần 4 — dựa trên bằng chứng thật, không đoán):
+      # log build lần #46 cho thấy đúng nguyên nhân: file build.gradle THẬT
+      # của package `jni` (đọc trực tiếp từ pub-cache) có đoạn:
+      #   def agpMajor = ...ANDROID_GRADLE_PLUGIN_VERSION.tokenize('.')[0]
+      #   if (agpMajor < 9) { apply plugin: 'kotlin-android' }
+      #   ...
+      #   kotlin { compilerOptions { ... } }   // dòng gây lỗi
+      # Nghĩa là: `jni` CHỈ tự áp dụng plugin Kotlin khi AGP < 9. Scaffold
+      # Flutter hiện sinh ra AGP "9.0.1" (thấy trong settings.gradle.kts log
+      # thật) → điều kiện sai → plugin Kotlin không được áp dụng → khối
+      # `kotlin {...}` ở dòng 84 không tìm thấy extension tương ứng → lỗi.
+      # Tài liệu chính thức Android Developers cũng xác nhận AGP 9.0 đổi
+      # sang "built-in Kotlin", và plugin org.jetbrains.kotlin.android CŨ
+      # "không tương thích với DSL mới" của AGP 9 — nên không tự ép áp dụng
+      # lại plugin cũ vào project dùng AGP 9 (sẽ đụng đúng điều Google nói là
+      # không tương thích). Cách chắc ăn hơn: hạ AGP xuống dưới 9, đúng nhánh
+      # code mà `jni` đã viết/test.
+      #
+      # Version cụ thể dùng — có bằng chứng, không đoán:
+      # - AGP 8.13.0: tài liệu chính thức Android Developers ghi rõ
+      #   "AGP 8.13 now requires Gradle 8.13" — cặp version khớp nhau xác
+      #   nhận được, không phải suy đoán.
+      # - Gradle 8.13: đúng theo yêu cầu ở trên.
+      # - Kotlin 2.1.20: bản ổn định, thuộc dải "Kotlin 2.1.x + AGP 8.x" đã
+      #   được ghi nhận là tổ hợp chạy ổn định trước khi hệ sinh thái chuyển
+      #   sang AGP 9 (không có bằng chứng trực tiếp xác nhận đúng bản lẻ
+      #   2.1.20 với đúng Gradle 8.13 — đây là phần có rủi ro thấp còn sót
+      #   lại, sẽ biết ngay qua log nếu cần chỉnh thêm).
+      - name: Hạ AGP xuống dưới 9 + Gradle khớp version (khớp đúng điều kiện mà package jni yêu cầu)
+        run: |
+          python3 -c "
+          import glob
+          candidates = glob.glob('scaffold/android/settings.gradle.kts') + glob.glob('scaffold/android/settings.gradle')
+          assert candidates, 'Khong tim thay settings.gradle'
+          path = candidates[0]
+          print('=== Noi dung ' + path + ' TRUOC khi ha AGP/Kotlin ===')
+          content = open(path).read()
+          print(content)
+          content = content.replace('version \"9.0.1\"', 'version \"8.13.0\"').replace(\"version '9.0.1'\", \"version '8.13.0'\")
+          content = content.replace('version \"2.3.20\"', 'version \"2.1.20\"').replace(\"version '2.3.20'\", \"version '2.1.20'\")
+          open(path, 'w').write(content)
+          print('=== Noi dung ' + path + ' SAU khi ha AGP/Kotlin ===')
+          print(content)
+          "
+          python3 -c "
+          import re, glob
+          candidates = glob.glob('scaffold/android/gradle/wrapper/gradle-wrapper.properties')
+          assert candidates, 'Khong tim thay gradle-wrapper.properties'
+          path = candidates[0]
+          content = open(path).read()
+          print('=== Noi dung gradle-wrapper.properties TRUOC khi sua ===')
+          print(content)
+          new_content = re.sub(r'gradle-[0-9.]+-(bin|all)\.zip', 'gradle-8.13-bin.zip', content)
+          open(path, 'w').write(new_content)
+          print('=== Noi dung gradle-wrapper.properties SAU khi sua ===')
+          print(new_content)
+          "
+
+      - name: Nâng minSdk lên 28 (yêu cầu bởi engine AI local)
+        run: |
+          find scaffold/android -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -exec sed -i \
+            -e 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion 28/' \
+            -e 's/minSdkVersion = flutter\.minSdkVersion/minSdkVersion = 28/' \
+            -e 's/minSdk = flutter\.minSdkVersion/minSdk = 28/' \
+            -e 's/minSdk flutter\.minSdkVersion/minSdk 28/' {} \;
+
+      - name: Ghép code Dart đã viết vào khung vừa sinh
+        run: |
+          rm -rf scaffold/lib
+          cp -r extracted/local_novel/lib scaffold/lib
+          cp extracted/local_novel/pubspec.yaml scaffold/pubspec.yaml
+          # ĐÃ THÊM (2026-07-27): nếu source zip đã có sẵn pubspec.lock (từ
+          # lần build trước, tự tải về qua artifact "pubspec-lock" ở cuối
+          # workflow này) thì copy luôn qua — `flutter pub get` sẽ tôn trọng
+          # file lock này, không tự ý nâng version bất kỳ gói nào (kể cả gói
+          # gián tiếp như jni) nữa. Nếu chưa có (lần đầu chạy với bản sửa
+          # này), bỏ qua bình thường, không lỗi.
+          if [ -f extracted/local_novel/pubspec.lock ]; then
+            echo "Tìm thấy pubspec.lock có sẵn trong source — dùng lại để khoá version."
+            cp extracted/local_novel/pubspec.lock scaffold/pubspec.lock
+          else
+            echo "CHƯA có pubspec.lock trong source — pub sẽ tự giải cây dependency mới. Nhớ tải artifact 'pubspec-lock' ở cuối lần chạy này, đưa vào cùng chỗ pubspec.yaml trong zip nguồn, để lần sau khoá version lại."
+          fi
+
+      - name: Đổi tên app hiển thị thành LocalNovel
+        run: sed -i 's/android:label="[^"]*"/android:label="LocalNovel"/' scaffold/android/app/src/main/AndroidManifest.xml
+
+      - name: Thêm quyền Internet và truy cập file cho Android
+        run: |
+          sed -i 's#<application#<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/><application#' scaffold/android/app/src/main/AndroidManifest.xml
+          sed -i 's#<manifest #<manifest xmlns:tools="http://schemas.android.com/tools" #' scaffold/android/app/src/main/AndroidManifest.xml
+
+      # ĐÃ SỬA (2026-08-02, phát hiện qua báo cáo thật của người dùng: app bị
+      # hệ điều hành kill khi chuyển sang trình duyệt rồi quay lại trong lúc
+      # đang chờ AI trả lời): MainActivity.kt ĐÃ CÓ SẴN code xin quyền
+      # POST_NOTIFICATIONS lúc chạy (ActivityCompat.requestPermissions), NHƯNG
+      # Manifest chưa từng khai báo quyền này trong <uses-permission> — thiếu
+      # khai báo Manifest thì lệnh xin quyền runtime GẦN NHƯ VÔ TÁC DỤNG
+      # (Android không cho xin quyền chưa được khai báo trong Manifest của
+      # chính app). Thiếu quyền này, thông báo liên tục của Foreground Service
+      # có thể không hiển thị đúng cách — nhiều OEM (đặc biệt ASUS ZenUI) dùng
+      # "có thông báo liên tục hiển thị hay không" làm 1 tiêu chí để quyết
+      # định có bảo vệ tiến trình nền hay không, thiếu thông báo hiển thị đúng
+      # có thể khiến trình quản lý pin của máy coi app là nền thường và kill
+      # khi chuyển sang ứng dụng khác — đúng triệu chứng người dùng báo cáo.
+      - name: Khai báo GenerationService (Foreground Service) + CancelGenerationReceiver (nút Hủy trên notification) trong Manifest — thiếu bước này khiến WakeLock/Foreground Service/nút Hủy không có tác dụng
+        run: |
+          sed -i 's#<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>#<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/><uses-permission android:name="android.permission.WAKE_LOCK"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>#' scaffold/android/app/src/main/AndroidManifest.xml
+          python3 -c "
+          path = 'scaffold/android/app/src/main/AndroidManifest.xml'
+          content = open(path).read()
+          service_tag = '<service android:name=\"com.localnovel.mnnbridge.GenerationService\" android:foregroundServiceType=\"specialUse\" android:exported=\"false\"><property android:name=\"android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE\" android:value=\"local_on_device_ai_text_generation\" /></service>'
+          receiver_tag = '<receiver android:name=\"com.localnovel.mnnbridge.CancelGenerationReceiver\" android:exported=\"false\"><intent-filter><action android:name=\"com.localnovel.mnnbridge.ACTION_CANCEL_GENERATION\" /></intent-filter></receiver>'
+          assert '</application>' in content, 'Khong tim thay the dong </application> trong Manifest'
+          content = content.replace('</application>', service_tag + receiver_tag + '</application>')
+          open(path, 'w').write(content)
+          print('=== Noi dung AndroidManifest.xml SAU khi them service+receiver ===')
+          print(content)
+          "
+
+      - name: Cài thư viện Dart
+        working-directory: scaffold
+        run: flutter pub get
+
+      # ĐÃ THÊM (2026-07-27): vá lỗi build "Could not find method kotlin()
+      # for arguments [...] on project ':jni'" — package `jni` không được
+      # khai báo trực tiếp trong pubspec.yaml của app, nó bị 1 gói khác kéo
+      # vào gián tiếp ở bản 1.0.1, bản này có build.gradle gọi hàm kotlin()
+      # không tương thích với tổ hợp Gradle/Kotlin/AGP hiện tại. Bản `jni`
+      # mới hơn đã bỏ hẳn cách gọi này (xem changelog chính thức: "Removed
+      # the dependency on kotlin_gradle_plugin"). Dùng --major-versions để
+      # luôn lấy đúng bản MỚI NHẤT thật có trên pub.dev tại thời điểm build,
+      # không cần hardcode số phiên bản (số đó sẽ đổi theo thời gian, hardcode
+      # vào đây sẽ lại lỗi thời y như jni: 1.0.1 đang lỗi bây giờ).
+      #
+      # SỬA LẠI (2026-07-27, lần 2): bước trước dùng `grep -q "^jni "` để
+      # kiểm tra jni có trong cây dependency không trước khi nâng cấp — NHƯNG
+      # `flutter pub deps --style=list` in ra dạng "- jni 1.0.1" (có "- " ở
+      # đầu dòng), không phải "jni 1.0.1" như điều kiện giả định. Nghĩa là
+      # điều kiện đó gần như luôn sai, bước nâng cấp CHƯA TỪNG được gọi ở lần
+      # build trước — đây là lý do lỗi lặp lại y hệt dù đã "thêm bước vá".
+      # Bỏ hẳn logic kiểm tra, làm trực tiếp + in rõ version TRƯỚC và SAU để
+      # có bằng chứng thật (không đoán) cho lần đọc log tiếp theo:
+      # SỬA LẠI (2026-07-27, lần 3): log thật từ lần build trước cho thấy
+      # `flutter pub upgrade jni --major-versions` LUÔN thất bại với lý do
+      # rất cụ thể: lệnh này chỉ hợp lệ với dependency KHAI BÁO TRỰC TIẾP,
+      # trong khi jni trước đó chỉ là transitive — không phải lỗi cú pháp gì
+      # cả, mà là giới hạn thật của công cụ pub. Đã thêm `jni: any` trực tiếp
+      # vào pubspec.yaml (xem comment ở đó) để bước này giờ mới thực sự hợp
+      # lệ và chạy được.
+      - name: Nâng jni lên bản mới nhất (vá lỗi kotlin() Gradle không tương thích)
+        working-directory: scaffold
+        run: |
+          echo "=== Version jni TRƯỚC khi nâng cấp ==="
+          grep -A2 '^  jni:' pubspec.lock 2>/dev/null || echo "(chưa có pubspec.lock hoặc jni không có trong đó)"
+          flutter pub upgrade jni --major-versions || echo "!!! flutter pub upgrade jni VẪN thất bại dù đã khai báo trực tiếp — xem kỹ log ngay phía trên dòng này, đây sẽ là bằng chứng quan trọng nhất nếu lỗi vẫn còn."
+          echo "=== Version jni SAU khi nâng cấp (đọc thẳng từ pubspec.lock, không suy đoán) ==="
+          grep -A2 '^  jni:' pubspec.lock 2>/dev/null || echo "(vẫn không thấy jni trong pubspec.lock — bất thường, cần xem log 'flutter pub upgrade' phía trên)"
+
+      # ĐÃ THÊM (2026-07-27): lưu lại đúng pubspec.lock THẬT của lần build
+      # này (dù thành công hay thất bại ở các bước sau) — để tải về, đưa vào
+      # zip nguồn cho lần sau, từ đó khoá version, không còn trôi nữa.
+      - name: Lưu lại pubspec.lock của lần build này (để khoá version cho lần sau)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pubspec-lock
+          path: scaffold/pubspec.lock
+
+      # ĐÃ THÊM (2026-07-27, lần 2): in thẳng nội dung THẬT của build.gradle
+      # bên trong package jni (đọc từ pub-cache, không phải suy đoán) — nếu
+      # bước nâng cấp ở trên vẫn không đủ (vd bản mới nhất của jni cũng có
+      # cùng vấn đề, hoặc lỗi thật ra nằm ở phiên bản Kotlin Gradle Plugin mà
+      # scaffold Flutter tự sinh ra chứ không phải ở bản thân jni), log này
+      # cho biết chính xác dòng nào đang gọi kotlin(...) và trong bối cảnh
+      # nào — để sửa đúng chỗ ở lần tiếp theo, không phải đoán mò nữa.
+      - name: In nội dung build.gradle thật của package jni (chẩn đoán, không sửa gì)
+        run: |
+          # SỬA LẠI (2026-07-27, lần 3): pattern find trước đó quá lỏng,
+          # khớp NHẦM cả file trong "example/android/build.gradle" (project
+          # mẫu đóng gói kèm package, vô hại, không liên quan) — và vì dùng
+          # `head -1`, nó lấy đúng file sai đó. Giới hạn rõ: chỉ tìm
+          # "<tên gói>/android/build.gradle" ở ĐÚNG 1 cấp dưới thư mục gói,
+          # loại trừ hẳn mọi đường dẫn có "/example/".
+          JNI_DIR="$(find ~/.pub-cache/hosted/pub.dev -maxdepth 1 -name 'jni-*' -type d | sort -V | tail -1)"
+          echo "Thư mục package jni tìm thấy: $JNI_DIR"
+          JNI_GRADLE="$JNI_DIR/android/build.gradle"
+          if [ -f "$JNI_GRADLE" ]; then
+            echo "=== Nội dung đầy đủ build.gradle THẬT của jni (không phải example) ==="
+            cat -n "$JNI_GRADLE"
+          else
+            echo "Không thấy file tại $JNI_GRADLE — liệt kê toàn bộ cây thư mục để đối chiếu:"
+            find "$JNI_DIR" -maxdepth 3
+          fi
+          echo "=== Version Kotlin Gradle Plugin mà scaffold Flutter tự sinh ra (settings.gradle) ==="
+          find scaffold/android -maxdepth 1 -name "settings.gradle*" -exec cat {} \;
+
+      # ĐÃ ĐẢO NGƯỢC THỨ TỰ ƯU TIÊN — mục BI, 2026-09-19. Trước đây (comment
+      # cũ giữ lại dưới đây để đối chiếu lịch sử) CHỦ Ý ưu tiên `master`
+      # HEAD trước, chỉ lùi về tag ổn định KHI BUILD LỖI HẲN — theo đúng
+      # yêu cầu người dùng lúc đó ("không đánh đổi bản mới nhất"). Giờ ĐẢO
+      # LẠI, vì chính người dùng vừa tự chỉ ra điểm mù trong lựa chọn đó:
+      # `--depth 1` không ghim version → MỖI LẦN build có thể dùng 1 commit
+      # MNN HOÀN TOÀN KHÁC nhau, và fallback CŨ chỉ kích hoạt khi BUILD THẤT
+      # BẠI HẲN (lỗi biên dịch) — không kích hoạt khi build THÀNH CÔNG
+      # nhưng SINH SAI KẾT QUẢ LÚC CHẠY (đúng chính xác triệu chứng lặp ký
+      # tự đang gặp).
+      #
+      # Bằng chứng cụ thể (tra changelog CHÍNH THỨC alibaba/MNN, không đoán):
+      # - MNN 3.5.0 (phát hành 2026-04): CHƯA có 2 thay đổi dưới đây.
+      # - MNN 3.6.0 (phát hành 2026-06): changelog GHI RÕ "GPU 多后端深度优化"
+      #   thêm MỚI cho OpenCL: "GEMM/GEMV 启发式调度" (heuristic scheduling
+      #   cho phép GEMM/GEMV — chính là phép tính lõi của MỌI bước sinh
+      #   token) VÀ "int4 image1d_buffer_t 优化" (tối ưu MỚI cho ĐÚNG kiểu
+      #   lượng tử hoá int4/q4 — TẤT CẢ model app này đang dùng đều là q4).
+      # - alibaba/MNN issue #4836 (mở 2026-09-08, SAU cả 3.6.0): OpenCL sinh
+      #   ký tự rác đa ngôn ngữ, không báo lỗi, trên GPU khác (Intel) —
+      #   xác nhận ĐÂY LÀ LỖI CÓ THẬT, MỚI, không phải chỉ riêng máy test ở
+      #   đây, và mốc thời gian KHỚP ĐÚNG với việc người dùng nhớ lại
+      #   "tháng trước GPU vẫn sinh chữ bình thường, sau này mới ra rác".
+      #
+      # → Rất có khả năng chính 2 thay đổi OpenCL/int4 mới của 3.6.0 (hoặc
+      # 1 commit nào đó trên master SAU 3.5.0) là nguồn gốc thật của lỗi
+      # lặp ký tự — không phải sampler/template/thread_num đã lần lượt
+      # loại trừ ở các mục trước. GHIM về tag 3.5.0 (bản CHÍNH THỨC ngay
+      # TRƯỚC 2 thay đổi nghi vấn) làm bản build CHÍNH — build luôn tái lập
+      # được (reproducible) từ giờ, không còn phụ thuộc "đúng lúc bấm build
+      # thì master đang ở commit nào". `master` HEAD lùi xuống làm DỰ PHÒNG
+      # (chỉ dùng khi chính 3.5.0 build lỗi hẳn — hiếm, vì đây là tag phát
+      # hành chính thức đã qua kiểm thử, ổn định hơn nhiều so với master).
+      #
+      # === Lịch sử quyết định CŨ (giữ lại để đối chiếu, không áp dụng nữa) ===
+      # "`git clone --depth 1` (bước trên) luôn lấy đúng HEAD `master` tại
+      # thời điểm build — có lợi THẬT (luôn có tính năng/bản vá MNN mới
+      # nhất — chính "penalty" trong `mixed_samplers` app đang dùng chỉ có
+      # từ bản 3.5.0 trở lên), nhưng cũng có nghĩa build phụ thuộc vào việc
+      # master KHÔNG lỗi tạm thời đúng lúc build chạy — rủi ro có thật,
+      # ngoài tầm kiểm soát của app. Theo đúng yêu cầu người dùng ("không
+      # đánh đổi bản mới nhất, làm fallback"): vẫn ưu tiên build bằng bản
+      # vừa clone (master); CHỈ KHI build đó thất bại mới xoá sạch, clone
+      # lại đúng 1 bản TAG ỔN ĐỊNH đã biết..."
+      # ĐÃ THÊM (theo yêu cầu người dùng: "dự án khác có cache nên build
+      # nhanh hơn, làm sao để được như vậy") — TRƯỚC ĐÂY workflow này
+      # KHÔNG cache bất kỳ thứ gì: mỗi lần chạy đều clone + biên dịch LẠI
+      # TOÀN BỘ engine MNN (LLM+OpenCL+QNN) từ mã nguồn C++ — đây gần như
+      # chắc chắn là phần TỐN THỜI GIAN NHẤT của cả workflow (đủ nặng để
+      # cần thêm bước tăng bộ nhớ ảo ở đầu file này), trong khi phần THẬT
+      # SỰ đổi giữa các lần build (code Dart/Kotlin của app) không hề đụng
+      # tới mã nguồn MNN. Vì bản MNN đã GHIM CỐ ĐỊNH ở tag 3.5.0 (mục BI)
+      # — không đổi trừ khi chính file build.yml này bị sửa — kết quả biên
+      # dịch MNN sẽ GIỐNG HỆT nhau giữa các lần chạy, miễn là: tag MNN,
+      # cờ CMake, và bản QNN SDK không đổi — cả 3 thứ đó đều nằm ngay
+      # TRONG chính file build.yml này, nên dùng hash nội dung file này
+      # làm khoá cache là đủ, không cần liệt kê tay từng biến.
+      #
+      # CHỈ cache thư mục KẾT QUẢ biên dịch (`build_64`) — bước "Clone mã
+      # nguồn"/"Vá demo TTS"/"Tải QNN SDK" bên dưới vẫn chạy BÌNH THƯỜNG
+      # mọi lần (chi phí nhỏ, vài chục giây, và các bước sau vẫn cần cây
+      # mã nguồn MNN + QNN SDK có mặt để lấy header/thư viện QNN) — CHỈ
+      # bước biên dịch CMake nặng (`Build engine MNN native` ngay dưới)
+      # được đánh dấu `if:` để BỎ QUA hẳn khi cache trúng, tiết kiệm đúng
+      # phần nặng nhất mà không đụng gì tới các bước còn lại — an toàn
+      # hơn là cố bỏ qua cả chuỗi nhiều bước.
+      #
+      # Giới hạn thật, chưa xác nhận — không giấu: CHƯA build/test thật
+      # (môi trường soạn file này không chạy được GitHub Actions thật) —
+      # cần chạy thử 2 lần liên tiếp (không đổi gì) để xác nhận lần 2 có
+      # thật sự bắt được cache (`cache-hit: true` trong log) và rút ngắn
+      # thời gian build hay không.
+      # QUAN TRỌNG — CHƯA XÁC NHẬN: `hashFiles('build.yml')` giả định file
+      # này nằm ĐÚNG TẠI `.github/workflows/build.yml` (đường dẫn tương
+      # đối tính từ gốc repo mà `hashFiles()` cần) — chưa xác nhận được
+      # đường dẫn thật trong repo GitHub của bạn (chỉ có nội dung file này
+      # ở dạng tải lên riêng, không thấy cây thư mục thật). Nếu tên file/
+      # đường dẫn khác đi, SỬA lại chuỗi `'build.yml'` ở dòng key bên dưới
+      # (và ở dòng key cache Gradle phía cuối file) cho khớp đúng đường
+      # dẫn thật — nếu sai đường dẫn, `hashFiles()` trả về rỗng, cache vẫn
+      # chạy được nhưng sẽ KHÔNG tự làm mới khi bạn đổi cờ CMake/bản MNN/
+      # QNN SDK trong file này (rủi ro dùng nhầm cache cũ, không phải lỗi
+      # dừng build).
+      - name: Cache thư viện MNN đã build sẵn (bỏ qua bước biên dịch C++ nặng nếu chưa đổi gì)
+        id: cache-mnn
+        uses: actions/cache@v4
+        with:
+          path: MNN/project/android/build_64
+          key: mnn-build-v1-${{ hashFiles('build.yml') }}-ndk-${{ env.ANDROID_NDK }}
+
+      - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.5.0 (bản ổn định TRƯỚC thay đổi OpenCL/int4 nghi vấn ở 3.6.0)
+        run: git clone --depth 1 --branch 3.5.0 https://github.com/alibaba/MNN.git
+
+      # ĐÃ THÊM (theo yêu cầu người dùng: "sao không tra cứu cách MNN/cộng
+      # đồng giải quyết vấn đề" — tra cứu thật thì tìm được: changelog
+      # chính thức MNN bản 3.4.1 ghi rõ "LLM 资源管理优化: LLM 实例内置独立
+      # Executor 并在所有公开方法中使用 ExecutorScope，确保正确的资源作用
+      # 域和及时释放" (dịch: mỗi instance Llm giờ tự tạo Executor RIÊNG,
+      # dùng ExecutorScope ở MỌI public method, đảm bảo phạm vi tài
+      # nguyên đúng và giải phóng kịp thời) — ĐÚNG NGUYÊN VĂN loại lỗi đã
+      # đo được bằng VmRSS (mục 23 tài liệu kiến trúc: ~2.58GB không được
+      # giải phóng khi đổi model trong cùng tiến trình). `git clone --depth
+      # 1` luôn lấy đúng HEAD của `master` tại THỜI ĐIỂM BUILD — nên rất
+      # có thể bản đang chạy ĐÃ CÓ fix này rồi (master luôn đi sau tag
+      # release). Nhưng vì `--depth 1` không giữ lại tag/version rõ ràng,
+      # KHÔNG CÓ CÁCH NÀO xác nhận trong log cũ đã build với đúng commit
+      # nào — in ra đây để MỌI LẦN BUILD SAU đều có commit hash + (nếu
+      # tìm thấy) số version thật, đối chiếu được với lịch sử fix của MNN
+      # khi cần điều tra tiếp.
+      - name: In thông tin commit/version MNN THẬT ĐÃ CLONE (để đối chiếu về sau — mục 23-24 tài liệu kiến trúc)
+        working-directory: MNN
+        run: |
+          echo "=== MNN commit hash (git clone --depth 1 từ master, LUÔN LÀ HEAD tại thời điểm build này) ==="
+          git rev-parse HEAD
+          git log -1 --format="%cI %s"
+          echo "=== Tìm file version nếu MNN có khai báo tường minh ==="
+          find . -maxdepth 2 -iname "*version*" -type f 2>/dev/null | head -5
+          grep -rn "MNN_VERSION" include/MNN/MNNDefine.h 2>/dev/null || echo "(không thấy MNN_VERSION trong MNNDefine.h — có thể đổi vị trí ở bản này)"
+
+      # ĐÃ SỬA LẦN 2 (build #82 xác nhận cách vá lần 1 SAI — xem mục 5.81
+      # tài liệu kiến trúc để biết đầy đủ): build #80 thất bại thật với
+      # lỗi "transformers/llm/engine/demo/qwen3_tts_demo.cpp:8:10: fatal
+      # error: 'audio/audio.hpp' file not found" — lỗi PHÍA THƯỢNG NGUỒN
+      # MNN (git clone --depth 1 từ nhánh master luôn lấy commit MỚI NHẤT,
+      # bản mới nhất có 1 demo TTS chưa hoàn thiện, thiếu header, nhưng
+      # vẫn được CMake build KHÔNG ĐIỀU KIỆN mỗi khi MNN_BUILD_LLM=true).
+      # App này KHÔNG cần bất kỳ demo executable nào của MNN — chỉ cần
+      # libMNN.so + libllm.so để JNI liên kết vào.
+      #
+      # LẦN VÁ ĐẦU (build #80→#82) ĐÃ SAI: xoá dòng đăng ký target trong
+      # MNN/transformers/llm/engine/demo/CMakeLists.txt (đoán sai vị trí)
+      # VÀ xoá thẳng file .cpp — nhưng log build #82 cho biết CHÍNH XÁC
+      # target thật được đăng ký ở FILE KHÁC: transformers/llm/engine/
+      # CMakeLists.txt dòng 93 (không phải file trong thư mục demo/), với
+      # lỗi mới "Cannot find source file" — vì file .cpp đã bị lệnh rm
+      # xoá mất trong khi add_executable() ở file cha vẫn tham chiếu tới
+      # nó theo đường dẫn tường minh.
+      #
+      # CÁCH VÁ ĐÚNG LẦN NÀY — không phụ thuộc đoán cú pháp CMake nội bộ
+      # của MNN (an toàn tuyệt đối với MỌI cách MNN đăng ký target, dù ở
+      # file nào, dòng nào, cú pháp explicit hay glob): GIỮ NGUYÊN file
+      # .cpp tại ĐÚNG đường dẫn gốc (không xoá), chỉ THAY NỘI DUNG bên
+      # trong bằng 1 chương trình C++ rỗng hợp lệ (main() trả về 0 ngay).
+      # CMake/add_executable() tìm thấy đúng file nó cần ở đúng chỗ →
+      # cấu hình qua bình thường; trình biên dịch biên dịch file rỗng →
+      # xong tức khắc, không còn include 'audio/audio.hpp' bị thiếu nữa;
+      # linker link 1 executable rỗng vào các thư viện sẵn có (không dùng
+      # symbol nào từ audio) → không lỗi thiếu symbol. Chỉ tạo ra 1 file
+      # thực thi demo TTS "rỗng, vô hại" mà app không bao giờ dùng tới —
+      # không ảnh hưởng gì tới libMNN.so/libllm.so mà app thật sự cần.
+      - name: Vá demo TTS hỏng của MNN — thay nội dung bằng file rỗng (KHÔNG xoá, KHÔNG đụng CMakeLists)
+        run: |
+          BROKEN_DEMO="MNN/transformers/llm/engine/demo/qwen3_tts_demo.cpp"
+          if [ -f "$BROKEN_DEMO" ]; then
+            echo "=== Nội dung GỐC (sẽ bị thay) ==="
+            head -20 "$BROKEN_DEMO"
+            printf '%s\n' \
+              '// ĐÃ THAY THẾ bởi build.yml — bản gốc include "audio/audio.hpp" không' \
+              '// tồn tại trong checkout MNN này (lỗi phía thượng nguồn), khiến build' \
+              '// thất bại dù app không hề dùng tới demo TTS này. Thay bằng no-op rỗng' \
+              '// để CMake/linker qua bình thường, không đụng tới bất kỳ target nào' \
+              '// khác (llm_demo, embedding_demo, libMNN.so, libllm.so đều không liên' \
+              '// quan tới file này).' \
+              'int main() { return 0; }' \
+              > "$BROKEN_DEMO"
+            echo "=== Nội dung MỚI (đã thay) ==="
+            cat "$BROKEN_DEMO"
+          else
+            echo "CẢNH BÁO: không thấy $BROKEN_DEMO — MNN có thể đã đổi cấu trúc thư mục, kiểm tra lại đường dẫn (build sẽ tự lộ lỗi rõ ràng nếu patch này không còn cần thiết hoặc không còn đúng chỗ)."
+          fi
+
+      # QNN backend của MNN cần header + thư viện thật của Qualcomm
+      # (QnnInterface.h...) — đây là SDK độc quyền, MNN không mang theo
+      # sẵn. Bản "Community" tải công khai được, không cần đăng nhập tài
+      # khoản Qualcomm — đúng theo hướng dẫn chính thức của MNN
+      # (mnn-docs.readthedocs.io/en/latest/inference/npu.html).
+      - name: Tải QNN SDK (Qualcomm) và đặt đúng chỗ MNN yêu cầu
+        run: |
+          wget --progress=dot:giga https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/2.40.0.251030/v2.40.0.251030.zip -O qnn_sdk.zip
+          echo "=== Kích thước file đã tải (nếu quá nhỏ, khả năng cao là trang lỗi chứ không phải SDK thật) ==="
+          ls -la qnn_sdk.zip
+          file qnn_sdk.zip
+          unzip -q qnn_sdk.zip -d qnn_sdk
+          echo "=== Cây thư mục sau khi giải nén (để xác nhận đúng cấu trúc thật, không đoán maxdepth) ==="
+          find qnn_sdk -maxdepth 3
+          QNN_SDK_ROOT="$(cd "$(dirname "$(find qnn_sdk -name QNN_README.txt | head -1)")" && pwd)"
+          echo "QNN_SDK_ROOT (tuyệt đối)=$QNN_SDK_ROOT"
+          if [ -z "$QNN_SDK_ROOT" ]; then
+            echo "KHÔNG tìm thấy QNN_README.txt — xem cây thư mục ở trên để biết cấu trúc thật, dừng lại ở đây thay vì lỗi mơ hồ tiếp"
+            exit 1
+          fi
+          echo "QNN_SDK_ROOT=$QNN_SDK_ROOT" >> $GITHUB_ENV
+          mkdir -p MNN/source/backend/qnn/3rdParty
+          cp -r "$QNN_SDK_ROOT/include/QNN" MNN/source/backend/qnn/3rdParty/include
+          cp -r "$QNN_SDK_ROOT/lib" MNN/source/backend/qnn/3rdParty/lib
+          echo "=== Xác nhận QnnInterface.h đã có đúng chỗ ==="
+          find MNN/source/backend/qnn/3rdParty -name "QnnInterface.h"
+
+      - name: Cache TRÚNG — bỏ qua biên dịch MNN, dùng thẳng thư viện đã cache
+        if: steps.cache-mnn.outputs.cache-hit == 'true'
+        run: |
+          echo "=== Cache MNN TRÚNG (key khớp với lần build trước) — bỏ qua hẳn bước biên dịch C++ nặng ==="
+          echo "=== Xác nhận nhanh thư mục cache có .so thật, không rỗng/hỏng ==="
+          find MNN/project/android/build_64 -name "*.so" | head -20
+          echo "MA_NGUON_MNN_THAT_DUNG=tag-3.5.0-tu-cache-khong-bien-dich-lai" >> $GITHUB_ENV
+
+      - name: Build engine MNN native (bật LLM + OpenCL GPU + QNN NPU)
+        if: steps.cache-mnn.outputs.cache-hit != 'true'
+        working-directory: MNN/project/android
+        run: |
+          # LỊCH SỬ (build #133, đã hết hiệu lực — xem mục BI ngay phía
+          # trên, ở bước "Clone mã nguồn chính thức MNN", để biết lý do
+          # ĐẢO NGƯỢC lại toàn bộ ưu tiên: giờ bước clone phía trên đã
+          # GHIM sẵn tag 3.5.0 làm bản chính — code dưới đây build thẳng
+          # bằng đúng bản đó trước, CHỈ KHI 3.5.0 build lỗi hẳn mới lùi
+          # sang master HEAD (không còn lùi sang 3.6.0 nữa — chính bản đó
+          # đang bị nghi mang theo lỗi OpenCL/int4 gây lặp ký tự).
+          set +e
+          mkdir build_64 && cd build_64 && \
+            ../build_64.sh "-DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DMNN_QNN=true -DMNN_SEP_BUILD=OFF -DCMAKE_INSTALL_PREFIX=." && \
+            make install
+          BUILD_RESULT=$?
+          set -e
+
+          if [ $BUILD_RESULT -ne 0 ]; then
+            echo "!!! Build bang MNN tag 3.5.0 (ban chinh, da ghim) THAT BAI — hiem gap vi day la ban phat hanh chinh thuc da qua kiem thu. Chuyen sang master HEAD moi nhat lam du phong (CANH BAO: master co the mang theo dung 2 thay doi OpenCL/int4 dang nghi van o mục BI — chi la giai phap tam thoi de co ban chay duoc, khong phai xac nhan da het loi lap ky tu) !!!"
+            cd "$GITHUB_WORKSPACE"
+            rm -rf MNN
+            git clone --depth 1 https://github.com/alibaba/MNN.git
+            echo "MA_NGUON_MNN_THAT_DUNG=master-HEAD-fallback-CANH-BAO-co-the-dinh-loi-opencl-int4" >> $GITHUB_ENV
+            mkdir -p MNN/source/backend/qnn/3rdParty
+            cp -r "$QNN_SDK_ROOT/include/QNN" MNN/source/backend/qnn/3rdParty/include
+            cp -r "$QNN_SDK_ROOT/lib" MNN/source/backend/qnn/3rdParty/lib
+            cd MNN/project/android
+            mkdir build_64 && cd build_64
+            ../build_64.sh "-DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DMNN_QNN=true -DMNN_SEP_BUILD=OFF -DCMAKE_INSTALL_PREFIX=."
+            make install
+          else
+            echo "MA_NGUON_MNN_THAT_DUNG=tag-3.5.0-ghim-on-dinh"
+            echo "MA_NGUON_MNN_THAT_DUNG=tag-3.5.0-ghim-on-dinh" >> $GITHUB_ENV
+          fi
+          echo "=== Ban MNN THAT SU vua duoc dung de build: $MA_NGUON_MNN_THAT_DUNG ==="
+
+      - name: In cấu trúc thư mục install thật (để xác nhận đúng đường dẫn .so/header trước khi build cầu nối)
+        run: |
+          echo "=== Toàn bộ cây thư mục install ==="
+          find MNN/project/android/build_64 -maxdepth 4 -type d
+          echo "=== Toàn bộ file .so tạo ra ==="
+          find MNN/project/android/build_64 -name "*.so"
+          echo "=== Toàn bộ header llm.hpp (nếu có) — đối chiếu tên hàm thật trước khi build cầu nối ==="
+          find MNN -path "*llm/engine/include*" -name "*.hpp" -exec echo "--- {} ---" \; -exec cat {} \;
+
+      - name: Ghép code native (Kotlin + JNI) vào project Android
+        run: |
+          # Không đoán/hardcode đường dẫn package — dò ĐÚNG vị trí + package
+          # thật mà `flutter create --org com.localnovel --project-name local_novel`
+          # vừa sinh ra cho MainActivity mặc định. Lệnh create ở trên ghép
+          # org + tên project thành package thật là "com.localnovel.local_novel",
+          # KHÁC với "com.localnovel" mà bước này từng hardcode — đây chính là
+          # nguyên nhân MainActivity thật của chúng ta (có đăng ký MethodChannel)
+          # không bao giờ được Android chạy tới, gây MissingPluginException dù
+          # build/cài đặt vẫn "thành công" bình thường.
+          DEFAULT_MAIN_ACTIVITY="$(find scaffold/android/app/src/main -name 'MainActivity.kt' -o -name 'MainActivity.java' | head -1)"
+          echo "MainActivity mặc định do flutter create sinh ra tại: $DEFAULT_MAIN_ACTIVITY"
+          test -n "$DEFAULT_MAIN_ACTIVITY" || { echo "KHÔNG tìm thấy MainActivity mặc định — cấu trúc scaffold đã đổi khác, dừng lại thay vì đoán tiếp"; exit 1; }
+
+          REAL_PACKAGE="$(grep -oP '(?<=^package )[a-zA-Z0-9_.]+' "$DEFAULT_MAIN_ACTIVITY")"
+          echo "Package thật của app: $REAL_PACKAGE"
+          REAL_PACKAGE_PATH="$(echo "$REAL_PACKAGE" | tr '.' '/')"
+
+          rm -f "$DEFAULT_MAIN_ACTIVITY"
+          mkdir -p "scaffold/android/app/src/main/kotlin/$REAL_PACKAGE_PATH"
+          mkdir -p scaffold/android/app/src/main/kotlin/com/localnovel/mnnbridge
+
+          cp extracted/local_novel/android_native/app/src/main/kotlin/com/localnovel/MainActivity.kt \
+             "scaffold/android/app/src/main/kotlin/$REAL_PACKAGE_PATH/MainActivity.kt"
+          sed -i "1s/^package .*/package $REAL_PACKAGE/" \
+             "scaffold/android/app/src/main/kotlin/$REAL_PACKAGE_PATH/MainActivity.kt"
+
+          cp extracted/local_novel/android_native/app/src/main/kotlin/com/localnovel/mnnbridge/*.kt \
+             scaffold/android/app/src/main/kotlin/com/localnovel/mnnbridge/
+
+          mkdir -p scaffold/android/app/src/main/cpp
+          cp extracted/local_novel/android_native/app/src/main/cpp/mnn_bridge.cpp scaffold/android/app/src/main/cpp/
+          cp extracted/local_novel/android_native/app/src/main/cpp/CMakeLists.txt scaffold/android/app/src/main/cpp/
+
+          echo "=== XAC NHAN (2026-07-28): mnn_bridge.cpp THAT SU dang duoc dung de build co chua dong sua createLLM/llm_config.json hay khong ==="
+          if grep -q "duong dan config THAT dung de goi createLLM" scaffold/android/app/src/main/cpp/mnn_bridge.cpp; then
+            echo "✅ CO — dong sua ve llm_config.json DA co mat trong file se duoc bien dich lan nay."
+          else
+            echo "💥 KHONG THAY — file mnn_bridge.cpp dang duoc dung KHONG chua ban sua createLLM/llm_config.json. Kiem tra lai zip source da upload dung ban moi nhat chua."
+          fi
+
+          echo "=== XAC NHAN (2026-07-29, MOI HON): mnn_bridge.cpp co chua ban sua use_mmap + chot chan chong lenh (muc 5.37) hay khong ==="
+          if grep -q "use_mmap" scaffold/android/app/src/main/cpp/mnn_bridge.cpp; then
+            echo "✅ CO use_mmap — dung ban sua MOI NHAT (muc 5.37)."
+          else
+            echo "💥 KHONG CO use_mmap — dang dung ban CU HON muc 5.37, du co the da co dong sua config.json cu hon (muc 33/35). Kiem tra lai zip source."
+          fi
+          if grep -q "g_loadingInProgress" scaffold/android/app/src/main/cpp/mnn_bridge.cpp; then
+            echo "✅ CO chot chan chong lenh (g_loadingInProgress)."
+          else
+            echo "💥 KHONG CO chot chan chong lenh — dang dung ban cu hon."
+          fi
+
+          echo "=== XAC NHAN (2026-07-29, MOI NHAT): mnn_bridge.cpp co chua bo bat crash tu viet (muc 5.39) hay khong ==="
+          if grep -q "crashSignalHandler" scaffold/android/app/src/main/cpp/mnn_bridge.cpp; then
+            echo "✅ CO bo bat crash tu viet — day la ban MOI NHAT (muc 5.39)."
+          else
+            echo "💥 KHONG CO bo bat crash tu viet — dang dung ban CU HON muc 5.39 (co the van la ban muc 5.37, du da co use_mmap)."
+          fi
+
+          echo "=== Xác nhận nội dung MainActivity.kt cuối cùng (phải thấy dòng đăng ký MethodChannel) ==="
+          cat "scaffold/android/app/src/main/kotlin/$REAL_PACKAGE_PATH/MainActivity.kt"
+
+      - name: Biên dịch cầu nối JNI (mnn_bridge.cpp), liên kết với engine MNN vừa build
+        run: |
+          MNN_INSTALL_DIR="$(pwd)/MNN/project/android/build_64"
+          cmake -B build_bridge -S scaffold/android/app/src/main/cpp \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
+            -DMNN_INSTALL_DIR="$MNN_INSTALL_DIR"
+          cmake --build build_bridge --config Release
+
+      - name: Đặt file .so vào đúng chỗ Android tự nhận (jniLibs) — không cần sửa Gradle
+        run: |
+          mkdir -p scaffold/android/app/src/main/jniLibs/arm64-v8a
+          find build_bridge -name "libmnn_bridge.so" -exec cp {} scaffold/android/app/src/main/jniLibs/arm64-v8a/ \;
+          find MNN/project/android/build_64 -name "*.so" -exec cp {} scaffold/android/app/src/main/jniLibs/arm64-v8a/ \;
+          HEXAGON_ARCH=68
+          QNN_LIB_DIR="MNN/source/backend/qnn/3rdParty/lib"
+          cp "$QNN_LIB_DIR/aarch64-android/libQnnHtp.so" scaffold/android/app/src/main/jniLibs/arm64-v8a/ 2>&1 || echo "THIẾU libQnnHtp.so — xem log tải QNN SDK ở bước trước"
+          cp "$QNN_LIB_DIR/aarch64-android/libQnnHtpPrepare.so" scaffold/android/app/src/main/jniLibs/arm64-v8a/ 2>&1 || echo "THIẾU libQnnHtpPrepare.so"
+          # THEM (2026-07-30): libQnnSystem.so — theo tai lieu chinh thuc
+          # MNN Chat (apps/Android/MnnLlmChat), day la 1 trong 5 thanh phan
+          # BAT BUOC cho QNN nhung truoc gio build.yml CHUA TUNG copy file
+          # nay — thieu no co the la nguyen nhan crash SIGSEGV khi QNN chay.
+          cp "$QNN_LIB_DIR/aarch64-android/libQnnSystem.so" scaffold/android/app/src/main/jniLibs/arm64-v8a/ 2>&1 || echo "THIẾU libQnnSystem.so — kiem tra lai cau truc thu muc QNN SDK o duoi"
+          cp "$QNN_LIB_DIR/aarch64-android/libQnnHtpV${HEXAGON_ARCH}Stub.so" scaffold/android/app/src/main/jniLibs/arm64-v8a/ 2>&1 || echo "THIẾU libQnnHtpV${HEXAGON_ARCH}Stub.so — có thể sai HEXAGON_ARCH, xem danh sách file thật ở dòng dưới"
+          cp "$QNN_LIB_DIR/hexagon-v${HEXAGON_ARCH}/unsigned/libQnnHtpV${HEXAGON_ARCH}Skel.so" scaffold/android/app/src/main/jniLibs/arm64-v8a/ 2>&1 || echo "THIẾU libQnnHtpV${HEXAGON_ARCH}Skel.so — có thể sai HEXAGON_ARCH"
+          echo "=== Toàn bộ thư mục lib thật trong QNN SDK (đối chiếu nếu HEXAGON_ARCH ở trên sai) ==="
+          find "$QNN_LIB_DIR" -maxdepth 2 -type d
+          echo "=== Danh sách .so đã đặt vào jniLibs ==="
+          ls -la scaffold/android/app/src/main/jniLibs/arm64-v8a/
+          # ĐÃ THÊM (theo log runtime thật cho thấy CẢ 5 file QNN đều
+          # UnsatisfiedLinkError/không tồn tại — build này rõ ràng đã "thành
+          # công" dù copy thất bại hết, vì mỗi `cp` ở trên chỉ `|| echo` cảnh
+          # báo chứ không dừng build): kiểm tra LẠI sau khi copy, in CẢNH BÁO
+          # LỚN không thể bỏ sót trong log CI nếu thiếu file — KHÔNG làm build
+          # thất bại hẳn (exit 1), vì app vẫn chạy được qua fallback OpenCL/CPU
+          # (xem local_provider.dart) — chỉ đảm bảo người review KHÔNG bỏ sót
+          # cảnh báo giữa hàng trăm dòng log build bình thường.
+          echo "=== Kiểm tra đủ 5 file QNN bắt buộc ==="
+          MISSING_QNN=0
+          for f in libQnnHtp.so libQnnHtpPrepare.so libQnnSystem.so "libQnnHtpV${HEXAGON_ARCH}Stub.so" "libQnnHtpV${HEXAGON_ARCH}Skel.so"; do
+            if [ ! -f "scaffold/android/app/src/main/jniLibs/arm64-v8a/$f" ]; then
+              echo "!!!!! THIẾU: $f !!!!!"
+              MISSING_QNN=1
+            fi
+          done
+          if [ "$MISSING_QNN" = "1" ]; then
+            echo "##########################################################"
+            echo "## CẢNH BÁO: THIẾU ÍT NHẤT 1 FILE QNN BẮT BUỘC.           ##"
+            echo "## Build này VẪN chạy được (fallback OpenCL/CPU tự động), ##"
+            echo "## NHƯNG QNN (tăng tốc NPU) SẼ KHÔNG HOẠT ĐỘNG trên máy   ##"
+            echo "## dù thiết bị có hỗ trợ thật — kiểm tra lại đường dẫn    ##"
+            echo "## QNN_LIB_DIR/HEXAGON_ARCH ở trên, đối chiếu với danh    ##"
+            echo "## sách thư mục thật đã in phía trên.                     ##"
+            echo "##########################################################"
+          fi
+
+      - name: Thêm dependency QNN runtime (Qualcomm, Maven Central) + Kotlin coroutines vào build.gradle
+        run: |
+          echo "=== Nội dung build.gradle app thật, trước khi sửa (để đối chiếu nếu sed dưới không khớp) ==="
+          cat scaffold/android/app/build.gradle* 2>/dev/null
+          find scaffold/android/app -name "build.gradle*" -exec sed -i \
+            -e '/dependencies {/a\implementation("com.qualcomm.qti:qnn-runtime:2.42.0")\implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")' {} \;
+
+      - name: Kiểm tra build.gradle đã thêm dependency thành công chưa
+        run: cat scaffold/android/app/build.gradle*
+
+      # ================== HẾT PHẦN CŨ ==================
+
+      # QUAN TRỌNG: đã xác nhận qua log debug thật trên máy — JNI
+      # GetMethodID("onToken", ...) trả về NULL ở bản release, tên lớp
+      # thật lúc chạy bị đổi thành "a0.a" (dấu hiệu R8/ProGuard đổi tên
+      # kinh điển). Theo tài liệu chính thức Flutter, các bản gần đây
+      # KHÔNG tắt được code shrinking cho bản release nữa (--no-shrink hết
+      # tác dụng) — nên KHÔNG cố tắt R8 nữa, mà thêm đúng luật "-keep" bảo
+      # vệ interface TokenCallback (và cả package com.localnovel nói
+      # chung, phòng hờ chỗ khác) khỏi bị đổi tên — cách chính thức được
+      # khuyến nghị để dùng JNI cùng R8.
+      - name: Thêm luật ProGuard "-keep" bảo vệ code gọi qua JNI khỏi bị R8 đổi tên
+        run: |
+          python3 -c "
+          rules = '\n# --- LocalNovel: giu nguyen ten cac lop/ham goi qua JNI ---\n-keep class com.localnovel.** { *; }\n-keepclassmembers class com.localnovel.** { *; }\n-keep interface com.localnovel.** { *; }\n'
+          with open('scaffold/android/app/proguard-rules.pro', 'a') as f:
+              f.write(rules)
+          print('=== Noi dung proguard-rules.pro SAU khi them luat ===')
+          print(open('scaffold/android/app/proguard-rules.pro').read())
+          "
+          python3 -c "
+          import re, glob
+          candidates = glob.glob('scaffold/android/app/build.gradle') + glob.glob('scaffold/android/app/build.gradle.kts')
+          assert candidates, 'Khong tim thay build.gradle'
+          path = candidates[0]
+          content = open(path).read()
+          if 'proguardFiles' in content:
+              print(path + ' da co proguardFiles tu truoc, khong can them.')
+          else:
+              is_kts = path.endswith('.kts')
+              line = '            proguardFiles(getDefaultProguardFile(\"proguard-android-optimize.txt\"), \"proguard-rules.pro\")\n' if is_kts else '            proguardFiles getDefaultProguardFile(\'proguard-android-optimize.txt\'), \'proguard-rules.pro\'\n'
+              match = re.search(r'release\s*\{', content)
+              assert match, 'Khong tim thay khoi release { trong ' + path
+              insert_at = match.end()
+              content = content[:insert_at] + '\n' + line + content[insert_at:]
+              open(path, 'w').write(content)
+              print('Da them dong proguardFiles vao ' + path)
+          print('=== Noi dung ' + path + ' SAU khi kiem tra/sua ===')
+          print(open(path).read())
+          "
+
+      # ĐÃ THÊM: `flutter build apk` gọi Gradle bên trong (không thấy rõ
+      # trong log ở mức workflow này) — Gradle tự tải AGP/Kotlin Gradle
+      # Plugin/AndroidX/thư viện Flutter embedding vào `~/.gradle/caches`
+      # mỗi lần build lại từ đầu (scaffold Flutter luôn TẠO MỚI, không kế
+      # thừa `~/.gradle` của lần trước) nếu không cache thư mục này. Khoá
+      # cache theo hash của build.yml (bắt được nếu đổi bản AGP/Gradle/
+      # Kotlin đang ghim ở bước "Hạ AGP xuống dưới 9...") — không hoàn
+      # hảo (gói `jni` cố tình luôn tự nâng lên bản mới nhất, không nằm
+      # trong hash này) nhưng vẫn tái dùng được phần lớn dependency ổn
+      # định (AGP, Kotlin, AndroidX, Flutter embedding) giữa các lần.
+      - name: Cache thư viện Gradle (AGP/Kotlin/AndroidX đã tải)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-v1-${{ hashFiles('build.yml') }}
+          restore-keys: |
+            gradle-v1-
+
+      - name: Build APK
+        working-directory: scaffold
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalNovel-apk
+          path: scaffold/build/app/outputs/flutter-apk/app-release.apk
