@@ -34,12 +34,47 @@ jobs:
           cache: true
           pub-cache: true
 
-      - name: Cài NDK mới nhất có sẵn (bản cũ không hỗ trợ SVE2/KleidiAI)
+      # ĐÃ SỬA (2026-09-27, theo bằng chứng THẬT — không đoán): build #1
+      # (lần đầu tiên chạy trong repo này, xác nhận qua ảnh chụp GitHub
+      # Actions của người dùng — không có build nào trước đó để so) dùng
+      # đúng "ndk;30.0.16248370" (NDK r30) — TRA CỨU xác nhận: r30 là bản
+      # LTS, phát hành CHÍNH THỨC ngày 8/9/2026 — CHỈ 19 ngày trước build
+      # này — mới tới mức máy chủ GitHub Actions còn đang có yêu cầu MỞ
+      # (issue #14722, chưa xong) để thêm bản này vào runner image mặc
+      # định. Trong khi MNN bản 3.5.0 (đang ghim, mục BI) phát hành khoảng
+      # 4/2026 — TRƯỚC KHI NDK r30 tồn tại — nghĩa là bản MNN đang dùng
+      # CHẮC CHẮN chưa từng được chính đội MNN build/test bằng toolchain
+      # NDK r30 (LLVM/Clang mới hơn hẳn — xem changelog r30: "Updated LLVM
+      # to clang-r574158"). Ngay sau khi build này chạy xong, người dùng
+      # báo model KHÔNG NẠP ĐƯỢC (`load()` trả về false ở CẢ OpenCL lẫn
+      # CPU, cho MỌI model) — dù trước đó (26/9, trước khi NDK r30 tồn tại
+      # đủ phổ biến) model vẫn nạp và chạy bình thường trên cùng phần
+      # cứng, cùng bản MNN 3.5.0.
+      #
+      # SỬA: ĐỔI HẲN từ "luôn lấy NDK mới nhất có sẵn" (rủi ro tự nhận từ
+      # đầu, dòng tên bước cũ) sang GHIM CỐ ĐỊNH đúng 1 bản đã xác nhận —
+      # chọn r29 ("29.0.14206865", tra cứu xác nhận qua trang chính thức
+      # github.com/android/ndk/wiki — bản ổn định trước r30) vì đây là bản
+      # "mới nhất" trong SUỐT quãng thời gian MNN 3.5.0 được phát triển và
+      # phát hành (r30 chỉ mới thay thế r29 làm "mới nhất" từ 8/9/2026,
+      # rất lâu sau khi MNN 3.5.0 đã ra mắt) — nhiều khả năng ĐÚNG bản
+      # toolchain mà chính đội MNN đã build/test 3.5.0 cùng lúc, hoặc rất
+      # gần với bản đó. Vẫn đủ mới để hỗ trợ SVE2/KleidiAI (lý do ban đầu
+      # bỏ NDK cũ) — r29 là bản CHÍNH (major version) sau r28, không phải
+      # bản cũ kỹ.
+      #
+      # Giới hạn thật — không giấu: ĐÂY LÀ GIẢ THUYẾT CÓ CĂN CỨ MẠNH (thời
+      # điểm khớp chính xác, cơ chế hợp lý — toolchain mới hơn build ra mã
+      # máy khác), KHÔNG PHẢI đã xác nhận 100% qua build thử — cần chạy
+      # lại build với bản ghim NDK r29 này và xác nhận model có nạp được
+      # trở lại hay không mới coi là ĐÃ SỬA XONG. Nếu vẫn lỗi, đây KHÔNG
+      # phải nguyên nhân (hoặc không phải nguyên nhân DUY NHẤT), cần tìm
+      # hướng khác.
+      - name: Cài NDK CỐ ĐỊNH r29 (29.0.14206865) — KHÔNG còn tự lấy "mới nhất" nữa
         run: |
-          NEWEST_NDK=$(yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --list 2>/dev/null | grep -oE "ndk;[0-9.]+" | sort -t';' -k2 -V | tail -1)
-          echo "Dùng NDK: $NEWEST_NDK"
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "$NEWEST_NDK"
-          NDK_VERSION=$(echo "$NEWEST_NDK" | cut -d';' -f2)
+          NDK_VERSION="29.0.14206865"
+          echo "Dùng NDK CỐ ĐỊNH: ndk;$NDK_VERSION"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VERSION"
           echo "ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
 
       - name: Tăng bộ nhớ ảo để tránh hết RAM khi build C++ nặng
@@ -337,12 +372,34 @@ jobs:
       # chạy được nhưng sẽ KHÔNG tự làm mới khi bạn đổi cờ CMake/bản MNN/
       # QNN SDK trong file này (rủi ro dùng nhầm cache cũ, không phải lỗi
       # dừng build).
-      - name: Cache thư viện MNN đã build sẵn (bỏ qua bước biên dịch C++ nặng nếu chưa đổi gì)
-        id: cache-mnn
-        uses: actions/cache@v4
+      # ĐÃ SỬA (2026-09-27, theo phản hồi người dùng: "vừa thêm cache xong
+      # là không nạp được model nữa") — RÀ LẠI BẰNG DIFF THẬT giữa bản
+      # trước/sau: xác nhận bản vá cache trước đó CHỈ thêm dòng, không
+      # xoá/sửa lệnh build gốc nào — và vì đây là lần ĐẦU dùng key
+      # `mnn-build-v1-...`, đáng lẽ CHẮC CHẮN "cache miss" nên bước build
+      # phải chạy y hệt như trước. CHƯA xác nhận được đây có đúng là
+      # nguyên nhân hay không (cần biết đã chạy build mấy lần + xem log
+      # GitHub Actions thật của đúng lần build ra bản lỗi).
+      #
+      # Trong lúc chờ xác nhận, chủ động làm 2 việc để loại trừ rủi ro
+      # cache dù CHƯA chắc chắn đó là nguyên nhân:
+      # 1) Đổi khoá cache v1 -> v2: BẢO ĐẢM lần build tiếp theo là cache
+      #    miss THẬT, bỏ qua hoàn toàn bất kỳ thứ gì có thể đã bị cache
+      #    (dù chưa rõ có hỏng hay không) — quay về trạng thái build đầy
+      #    đủ từ đầu, giống hệt trước khi có cache.
+      # 2) Tách riêng restore/save (thay vì 1 action gộp cả 2) + THÊM bước
+      #    kiểm tra THẬT libMNN.so/libllm.so tồn tại và KHÔNG rỗng trước
+      #    khi lưu cache — theo đúng mẫu chính thức GitHub khuyến nghị
+      #    (actions/cache/restore + actions/cache/save riêng, tra cứu xác
+      #    nhận qua tài liệu chính thức actions/cache) — CHỈ lưu cache khi
+      #    đã xác nhận thật có đủ file .so hợp lệ, không lưu mù theo kiểu
+      #    "step không báo lỗi thì chắc là ổn".
+      - name: Khôi phục cache thư viện MNN đã build sẵn (nếu có)
+        id: cache-mnn-restore
+        uses: actions/cache/restore@v4
         with:
           path: MNN/project/android/build_64
-          key: mnn-build-v1-${{ hashFiles('build.yml') }}-ndk-${{ env.ANDROID_NDK }}
+          key: mnn-build-v2-${{ hashFiles('build.yml') }}-ndk-${{ env.ANDROID_NDK }}
 
       - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.5.0 (bản ổn định TRƯỚC thay đổi OpenCL/int4 nghi vấn ở 3.6.0)
         run: git clone --depth 1 --branch 3.5.0 https://github.com/alibaba/MNN.git
@@ -453,7 +510,7 @@ jobs:
           find MNN/source/backend/qnn/3rdParty -name "QnnInterface.h"
 
       - name: Cache TRÚNG — bỏ qua biên dịch MNN, dùng thẳng thư viện đã cache
-        if: steps.cache-mnn.outputs.cache-hit == 'true'
+        if: steps.cache-mnn-restore.outputs.cache-hit == 'true'
         run: |
           echo "=== Cache MNN TRÚNG (key khớp với lần build trước) — bỏ qua hẳn bước biên dịch C++ nặng ==="
           echo "=== Xác nhận nhanh thư mục cache có .so thật, không rỗng/hỏng ==="
@@ -461,7 +518,7 @@ jobs:
           echo "MA_NGUON_MNN_THAT_DUNG=tag-3.5.0-tu-cache-khong-bien-dich-lai" >> $GITHUB_ENV
 
       - name: Build engine MNN native (bật LLM + OpenCL GPU + QNN NPU)
-        if: steps.cache-mnn.outputs.cache-hit != 'true'
+        if: steps.cache-mnn-restore.outputs.cache-hit != 'true'
         working-directory: MNN/project/android
         run: |
           # LỊCH SỬ (build #133, đã hết hiệu lực — xem mục BI ngay phía
@@ -505,6 +562,40 @@ jobs:
           find MNN/project/android/build_64 -name "*.so"
           echo "=== Toàn bộ header llm.hpp (nếu có) — đối chiếu tên hàm thật trước khi build cầu nối ==="
           find MNN -path "*llm/engine/include*" -name "*.hpp" -exec echo "--- {} ---" \; -exec cat {} \;
+
+      # ĐÃ THÊM (2026-09-27) — xác nhận THẬT (không chỉ tin "step không báo
+      # lỗi thì chắc ổn") rằng 2 file .so mà `CMakeLists.txt` của cầu nối
+      # JNI CẦN (xem chính file đó: tìm đúng "libMNN.so" và "libllm.so"
+      # hoặc "libMNN_llm.so", FATAL_ERROR nếu thiếu libMNN.so) thật sự tồn
+      # tại VÀ không rỗng/quá nhỏ (>1KB — 1 .so thật của MNN phải nặng
+      # hàng trăm KB tới vài MB, náu chỉ vài trăm byte gần như chắc chắn
+      # là file hỏng/build dở dang) — chạy vô điều kiện (cả 2 nhánh: vừa
+      # build mới lẫn phục hồi từ cache) để bắt được CẢ 2 kiểu lỗi: build
+      # mới bị hỏng, LẪN cache cũ (nếu có) đã bị hỏng từ trước.
+      - name: Xác nhận THẬT libMNN.so/libllm.so tồn tại và không rỗng (tránh dùng hoặc lưu cache thư viện hỏng)
+        run: |
+          set -e
+          found_mnn=$(find MNN/project/android/build_64 -name "libMNN.so" -size +1k | head -1)
+          if [ -z "$found_mnn" ]; then
+            echo "LOI THAT: khong tim thay libMNN.so hop le (thieu hoac qua nho, duoi 1KB) trong MNN/project/android/build_64"
+            echo "Neu day la nhanh CACHE TRUNG: cache dang HONG — vao GitHub repo > Settings > Actions > Caches, xoa cache co ten bat dau bang 'mnn-build-v2-' roi chay lai."
+            exit 1
+          fi
+          echo "OK: libMNN.so hop le tai $found_mnn ($(stat -c%s "$found_mnn" 2>/dev/null || stat -f%z "$found_mnn") byte)"
+          found_llm=$(find MNN/project/android/build_64 \( -name "libllm.so" -o -name "libMNN_llm.so" \) -size +1k | head -1)
+          if [ -z "$found_llm" ]; then
+            echo "LOI THAT: khong tim thay libllm.so/libMNN_llm.so hop le trong MNN/project/android/build_64"
+            echo "Neu day la nhanh CACHE TRUNG: cache dang HONG — vao GitHub repo > Settings > Actions > Caches, xoa cache co ten bat dau bang 'mnn-build-v2-' roi chay lai."
+            exit 1
+          fi
+          echo "OK: thu vien LLM hop le tai $found_llm ($(stat -c%s "$found_llm" 2>/dev/null || stat -f%z "$found_llm") byte)"
+
+      - name: Lưu cache thư viện MNN (CHỈ sau khi vừa build mới THÀNH CÔNG THẬT và đã xác nhận đủ file ở bước trên)
+        if: steps.cache-mnn-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: MNN/project/android/build_64
+          key: mnn-build-v2-${{ hashFiles('build.yml') }}-ndk-${{ env.ANDROID_NDK }}
 
       - name: Ghép code native (Kotlin + JNI) vào project Android
         run: |
