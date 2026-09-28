@@ -582,13 +582,20 @@ jobs:
             exit 1
           fi
           echo "OK: libMNN.so hop le tai $found_mnn ($(stat -c%s "$found_mnn" 2>/dev/null || stat -f%z "$found_mnn") byte)"
+          # ĐÃ SỬA (2026-09-27, lỗi THẬT tự gây ra ở build #2) — đọc lại
+          # đúng `android_native/app/src/main/cpp/CMakeLists.txt`: dòng
+          # `if(MNN_LLM_LIB)` xác nhận file libllm.so/libMNN_llm.so RIÊNG
+          # là TÙY CHỌN — không tìm thấy KHÔNG phải lỗi (rất có thể do cờ
+          # `-DMNN_SEP_BUILD=OFF` đang dùng khiến toàn bộ LLM gộp thẳng
+          # vào libMNN.so, không tách file riêng). Bản trước bắt lỗi SAI
+          # ở đây — dừng build #2 (9m26s) dù không có gì thật sự hỏng. Sửa
+          # thành CHỈ ghi log (không exit 1) nếu không tìm thấy.
           found_llm=$(find MNN/project/android/build_64 \( -name "libllm.so" -o -name "libMNN_llm.so" \) -size +1k | head -1)
           if [ -z "$found_llm" ]; then
-            echo "LOI THAT: khong tim thay libllm.so/libMNN_llm.so hop le trong MNN/project/android/build_64"
-            echo "Neu day la nhanh CACHE TRUNG: cache dang HONG — vao GitHub repo > Settings > Actions > Caches, xoa cache co ten bat dau bang 'mnn-build-v2-' roi chay lai."
-            exit 1
+            echo "GHI CHU (khong phai loi): khong tim thay libllm.so/libMNN_llm.so RIENG — binh thuong neu LLM da gop san vao libMNN.so (MNN_SEP_BUILD=OFF)."
+          else
+            echo "OK: thu vien LLM rieng tai $found_llm ($(stat -c%s "$found_llm" 2>/dev/null || stat -f%z "$found_llm") byte)"
           fi
-          echo "OK: thu vien LLM hop le tai $found_llm ($(stat -c%s "$found_llm" 2>/dev/null || stat -f%z "$found_llm") byte)"
 
       - name: Lưu cache thư viện MNN (CHỈ sau khi vừa build mới THÀNH CÔNG THẬT và đã xác nhận đủ file ở bước trên)
         if: steps.cache-mnn-restore.outputs.cache-hit != 'true'
