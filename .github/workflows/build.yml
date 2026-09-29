@@ -394,15 +394,32 @@ jobs:
       #    nhận qua tài liệu chính thức actions/cache) — CHỈ lưu cache khi
       #    đã xác nhận thật có đủ file .so hợp lệ, không lưu mù theo kiểu
       #    "step không báo lỗi thì chắc là ổn".
+      # ĐÃ SỬA (2026-09-29, lỗi THẬT bắt được qua log build #4 — không
+      # phải suy đoán): build #3 thành công → cache MNN được LƯU lần đầu
+      # → build #4 (ngay sau) là cache TRÚNG → bước khôi phục cache bên
+      # dưới đặt file vào đường dẫn LỒNG NHAU
+      # (`MNN/project/android/build_64`) — TỰ TẠO RA thư mục cha `MNN/`
+      # như tác dụng phụ (để có chỗ đặt `build_64` vào đúng vị trí) — rồi
+      # bước `git clone` NGAY SAU (trước đây đứng sau bước này) cố tạo
+      # lại chính thư mục `MNN/` đó, bị git từ chối thẳng: "fatal:
+      # destination path 'MNN' already exists and is not an empty
+      # directory" — build #4 fail ngay sau 59 giây, dừng hẳn ở bước
+      # clone, chưa hề chạm tới bất kỳ điều gì khác. SỬA bằng cách ĐỔI
+      # THỨ TỰ: clone TRƯỚC (tạo `MNN/` với cây mã nguồn thật, sạch), rồi
+      # MỚI khôi phục cache SAU — lúc đó `MNN/project/android/` đã tồn
+      # tại sẵn từ clone, khôi phục cache chỉ cần THÊM đúng thư mục con
+      # `build_64` vào cây đã có, không còn xung đột với git clone nữa
+      # (git clone chỉ chạy 1 lần, trước cache, không bị ai tạo trước
+      # thư mục đích của nó).
+      - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.5.0 (bản ổn định TRƯỚC thay đổi OpenCL/int4 nghi vấn ở 3.6.0)
+        run: git clone --depth 1 --branch 3.5.0 https://github.com/alibaba/MNN.git
+
       - name: Khôi phục cache thư viện MNN đã build sẵn (nếu có)
         id: cache-mnn-restore
         uses: actions/cache/restore@v4
         with:
           path: MNN/project/android/build_64
           key: mnn-build-v2-${{ hashFiles('build.yml') }}-ndk-${{ env.ANDROID_NDK }}
-
-      - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.5.0 (bản ổn định TRƯỚC thay đổi OpenCL/int4 nghi vấn ở 3.6.0)
-        run: git clone --depth 1 --branch 3.5.0 https://github.com/alibaba/MNN.git
 
       # ĐÃ THÊM (theo yêu cầu người dùng: "sao không tra cứu cách MNN/cộng
       # đồng giải quyết vấn đề" — tra cứu thật thì tìm được: changelog
