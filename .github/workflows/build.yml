@@ -413,8 +413,12 @@ jobs:
       # `build_64` vào cây đã có, không còn xung đột với git clone nữa
       # (git clone chỉ chạy 1 lần, trước cache, không bị ai tạo trước
       # thư mục đích của nó).
-      - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.5.0 (bản ổn định TRƯỚC thay đổi OpenCL/int4 nghi vấn ở 3.6.0)
-        run: git clone --depth 1 --branch 3.5.0 https://github.com/alibaba/MNN.git
+      # MỤC CE (2026-10-01) — ĐỔI ghim 3.5.0 -> 3.6.1. Bằng chứng THẬT từ log chẩn đoán mục CD: file llm.mnn của model
+      # (đọc bằng native, CRC khớp Java) chứa chuỗi phiên bản "3.6.1" ở cuối file => model do công cụ MNN 3.6.1 xuất.
+      # Runtime 3.5.0 (APK build trước) từ chối đúng file đó (verify FlatBuffers) dù bộ verify của chính thư viện hoạt động
+      # (net tự tạo đọc lại thành công). Runtime phải CÙNG HOẶC MỚI HƠN công cụ đã xuất model => dùng đúng tag 3.6.1.
+      - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.6.1 (khớp phiên bản công cụ đã xuất model, mục CE)
+        run: git clone --depth 1 --branch 3.6.1 https://github.com/alibaba/MNN.git
 
       - name: Khôi phục cache thư viện MNN đã build sẵn (nếu có)
         id: cache-mnn-restore
@@ -534,7 +538,7 @@ jobs:
           echo "=== Cache MNN TRÚNG (key khớp với lần build trước) — bỏ qua hẳn bước biên dịch C++ nặng ==="
           echo "=== Xác nhận nhanh thư mục cache có .so thật, không rỗng/hỏng ==="
           find MNN/project/android/build_64 -name "*.so" | head -20
-          echo "MA_NGUON_MNN_THAT_DUNG=tag-3.5.0-tu-cache-khong-bien-dich-lai" >> $GITHUB_ENV
+          echo "MA_NGUON_MNN_THAT_DUNG=tag-3.6.1-tu-cache-khong-bien-dich-lai" >> $GITHUB_ENV
 
       - name: Build engine MNN native (bật LLM + OpenCL GPU + QNN NPU)
         if: steps.cache-mnn-restore.outputs.cache-hit != 'true'
@@ -555,7 +559,7 @@ jobs:
           set -e
 
           if [ $BUILD_RESULT -ne 0 ]; then
-            echo "!!! Build bang MNN tag 3.5.0 (ban chinh, da ghim) THAT BAI — hiem gap vi day la ban phat hanh chinh thuc da qua kiem thu. Chuyen sang master HEAD moi nhat lam du phong (CANH BAO: master co the mang theo dung 2 thay doi OpenCL/int4 dang nghi van o mục BI — chi la giai phap tam thoi de co ban chay duoc, khong phai xac nhan da het loi lap ky tu) !!!"
+            echo "!!! Build bang MNN tag 3.6.1 (ban chinh, da ghim) THAT BAI — hiem gap vi day la ban phat hanh chinh thuc da qua kiem thu. Chuyen sang master HEAD moi nhat lam du phong (CANH BAO: master co the mang theo dung 2 thay doi OpenCL/int4 dang nghi van o mục BI — chi la giai phap tam thoi de co ban chay duoc, khong phai xac nhan da het loi lap ky tu) !!!"
             cd "$GITHUB_WORKSPACE"
             rm -rf MNN
             git clone --depth 1 https://github.com/alibaba/MNN.git
@@ -568,8 +572,8 @@ jobs:
             ../build_64.sh "-DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DMNN_QNN=true -DMNN_SEP_BUILD=OFF -DCMAKE_INSTALL_PREFIX=."
             make install
           else
-            echo "MA_NGUON_MNN_THAT_DUNG=tag-3.5.0-ghim-on-dinh"
-            echo "MA_NGUON_MNN_THAT_DUNG=tag-3.5.0-ghim-on-dinh" >> $GITHUB_ENV
+            echo "MA_NGUON_MNN_THAT_DUNG=tag-3.6.1-ghim-on-dinh"
+            echo "MA_NGUON_MNN_THAT_DUNG=tag-3.6.1-ghim-on-dinh" >> $GITHUB_ENV
           fi
           echo "=== Ban MNN THAT SU vua duoc dung de build: $MA_NGUON_MNN_THAT_DUNG ==="
 
