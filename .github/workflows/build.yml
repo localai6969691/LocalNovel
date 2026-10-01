@@ -205,8 +205,10 @@ jobs:
           content = open(path).read()
           service_tag = '<service android:name=\"com.localnovel.mnnbridge.GenerationService\" android:foregroundServiceType=\"specialUse\" android:exported=\"false\"><property android:name=\"android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE\" android:value=\"local_on_device_ai_text_generation\" /></service>'
           receiver_tag = '<receiver android:name=\"com.localnovel.mnnbridge.CancelGenerationReceiver\" android:exported=\"false\"><intent-filter><action android:name=\"com.localnovel.mnnbridge.ACTION_CANCEL_GENERATION\" /></intent-filter></receiver>'
+          # MUC CD (2026-10-01): log that cho thay linker Android 12+ chan app nap vendor libOpenCL.so vi Manifest chua khai bao thu vien native nay.
+          native_lib_tag = '<uses-native-library android:name=\"libOpenCL.so\" android:required=\"false\" />'
           assert '</application>' in content, 'Khong tim thay the dong </application> trong Manifest'
-          content = content.replace('</application>', service_tag + receiver_tag + '</application>')
+          content = content.replace('</application>', service_tag + receiver_tag + native_lib_tag + '</application>')
           open(path, 'w').write(content)
           print('=== Noi dung AndroidManifest.xml SAU khi them service+receiver ===')
           print(content)
