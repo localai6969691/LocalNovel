@@ -183,6 +183,12 @@ jobs:
         run: |
           sed -i 's#<application#<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/><application#' scaffold/android/app/src/main/AndroidManifest.xml
           sed -i 's#<manifest #<manifest xmlns:tools="http://schemas.android.com/tools" #' scaffold/android/app/src/main/AndroidManifest.xml
+          # MỤC CS (2026-10-07): tên bước nói "Internet" nhưng trước đây KHÔNG có dòng nào thêm quyền INTERNET (template Flutter chỉ khai báo nó ở
+          # manifest debug/profile, không phải release). API provider chạy được trước giờ nhiều khả năng nhờ 1 plugin tự thêm; WebView của "Web chat AI"
+          # thì BẮT BUỘC cần. Thêm có điều kiện (chỉ khi manifest chính chưa có) để không tạo khai báo trùng.
+          if ! grep -q 'android.permission.INTERNET' scaffold/android/app/src/main/AndroidManifest.xml; then
+            sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/><application#' scaffold/android/app/src/main/AndroidManifest.xml
+          fi
 
       # ĐÃ SỬA (2026-08-02, phát hiện qua báo cáo thật của người dùng: app bị
       # hệ điều hành kill khi chuyển sang trình duyệt rồi quay lại trong lúc
