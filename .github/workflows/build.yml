@@ -87,7 +87,23 @@ jobs:
           free -h
 
       - name: Giải nén code Flutter đã upload
-        run: unzip local_novel.zip -d extracted
+        run: |
+          unzip -q local_novel.zip -d extracted
+          # Muc CU2: zip nen ra ban nguon o `extracted/local_novel/` (cach lam cu cua du an).
+          # Neu ai do nen tu BEN TRONG thu muc (lib/ nam ngay goc zip) thi tu dong dua vao
+          # `local_novel/` de cac buoc sau khong bi vo (build #16 hong vi dieu nay).
+          if [ ! -d extracted/local_novel/lib ] && [ -d extracted/lib ]; then
+            echo "[CU2] zip khong co thu muc goc local_novel/ — tu dong boc vao extracted/local_novel/"
+            mkdir -p extracted/_wrap/local_novel
+            find extracted -mindepth 1 -maxdepth 1 ! -name _wrap -exec mv {} extracted/_wrap/local_novel/ \;
+            mv extracted/_wrap/local_novel extracted/local_novel
+            rmdir extracted/_wrap
+          fi
+          if [ ! -d extracted/local_novel/lib ]; then
+            echo "LOI THAT: khong thay lib/ trong zip (ca extracted/local_novel/lib lan extracted/lib). Noi dung:"
+            find extracted -maxdepth 2 | head -30
+            exit 1
+          fi
 
       - name: Sinh khung project Flutter đầy đủ (android/, ios/...)
         run: flutter create --org com.localnovel --project-name local_novel scaffold
