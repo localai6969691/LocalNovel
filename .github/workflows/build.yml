@@ -691,8 +691,21 @@ jobs:
              scaffold/android/app/src/main/kotlin/com/localnovel/mnnbridge/
 
           mkdir -p scaffold/android/app/src/main/cpp
-          cp extracted/local_novel/android_native/app/src/main/cpp/mnn_bridge.cpp scaffold/android/app/src/main/cpp/
+          # ĐÃ SỬA (build #15, 2026-10-10 — lỗi do chính mình gây ra ở mục CU): trước đây CHỈ chép đúng 2 file (mnn_bridge.cpp, CMakeLists.txt),
+          # nên file nguồn MỚI thêm vào CMakeLists (vulkan_probe.cpp) không được chép => "Cannot find source file: vulkan_probe.cpp".
+          # Giờ chép TOÀN BỘ *.cpp/*.h/*.hpp trong thư mục cpp (file thêm sau này tự được chép), rồi kiểm từng file nguồn mà CMakeLists nhắc tới.
+          cp extracted/local_novel/android_native/app/src/main/cpp/*.cpp scaffold/android/app/src/main/cpp/
+          cp extracted/local_novel/android_native/app/src/main/cpp/*.h scaffold/android/app/src/main/cpp/ 2>/dev/null || true
+          cp extracted/local_novel/android_native/app/src/main/cpp/*.hpp scaffold/android/app/src/main/cpp/ 2>/dev/null || true
           cp extracted/local_novel/android_native/app/src/main/cpp/CMakeLists.txt scaffold/android/app/src/main/cpp/
+          echo "=== Các file trong thư mục cpp của scaffold (phải có mnn_bridge.cpp và vulkan_probe.cpp) ==="
+          ls -la scaffold/android/app/src/main/cpp/
+          for srcf in $(grep -oE '[A-Za-z0-9_]+\.cpp' scaffold/android/app/src/main/cpp/CMakeLists.txt | sort -u); do
+            if [ ! -f "scaffold/android/app/src/main/cpp/$srcf" ]; then
+              echo "LOI THAT: CMakeLists.txt nhac toi $srcf nhung file nay KHONG co trong scaffold/android/app/src/main/cpp — kiem tra lai zip nguon da upload co du file chua."
+              exit 1
+            fi
+          done
 
           echo "=== XAC NHAN (2026-07-28): mnn_bridge.cpp THAT SU dang duoc dung de build co chua dong sua createLLM/llm_config.json hay khong ==="
           if grep -q "duong dan config THAT dung de goi createLLM" scaffold/android/app/src/main/cpp/mnn_bridge.cpp; then
