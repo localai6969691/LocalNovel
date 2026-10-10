@@ -557,11 +557,32 @@ jobs:
           # bằng đúng bản đó trước, CHỈ KHI 3.5.0 build lỗi hẳn mới lùi
           # sang master HEAD (không còn lùi sang 3.6.0 nữa — chính bản đó
           # đang bị nghi mang theo lỗi OpenCL/int4 gây lặp ký tự).
+          # MỤC CU (2026-10-10) — THÊM backend VULKAN của MNN để chạy PHÉP THỬ (nút "Thử Vulkan" trong Tối ưu AI local, backendPreference 5/6).
+          # Lý do + bằng chứng (đọc thẳng mã nguồn MNN 3.6.1): LLM trên Vulkan cần VulkanAttention + KV cache + conv int4/int8 — các file này CHỈ
+          # nằm trong thư mục `buffer/`, còn cờ mặc định MNN_VULKAN_IMAGE=ON lại biên dịch thư mục `image/` (không có Attention) => bắt buộc
+          # -DMNN_VULKAN_IMAGE=false. Shader đã biên dịch sẵn (compiler/AllShader.cpp, ~9MB, nằm trong repo) nên KHÔNG cần glslc/Vulkan SDK.
+          # MNN_USE_SYSTEM_LIB mặc định OFF => libvulkan.so được dlopen lúc chạy (không thêm phụ thuộc link). Hành vi MẶC ĐỊNH của app KHÔNG đổi
+          # (Tự động vẫn là CPU); Vulkan chỉ chạy khi người dùng chủ động chọn. NẾU build có Vulkan LỖI thì tự build lại như cũ (không Vulkan)
+          # để không làm hỏng cả build chỉ vì 1 phép thử.
           set +e
+          MNN_BASE_FLAGS="-DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DMNN_QNN=true -DMNN_SEP_BUILD=OFF -DCMAKE_INSTALL_PREFIX=."
           mkdir build_64 && cd build_64 && \
-            ../build_64.sh "-DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DMNN_QNN=true -DMNN_SEP_BUILD=OFF -DCMAKE_INSTALL_PREFIX=." && \
+            ../build_64.sh "$MNN_BASE_FLAGS -DMNN_VULKAN=true -DMNN_VULKAN_IMAGE=false" && \
             make install
           BUILD_RESULT=$?
+          if [ $BUILD_RESULT -eq 0 ]; then
+            echo "MA_NGUON_MNN_VULKAN=co-vulkan-buffer-mode" >> $GITHUB_ENV
+            echo "=== MNN build THANH CONG VOI Vulkan (buffer mode) ==="
+          else
+            echo "!!! [CU] Build MNN CO Vulkan THAT BAI — tu build lai KHONG Vulkan (nhu cu) de khong mat ca build vi 1 phep thu. Nut 'Thu Vulkan' se khong dung duoc o ban nay. !!!"
+            cd "$GITHUB_WORKSPACE/MNN/project/android"
+            rm -rf build_64
+            mkdir build_64 && cd build_64 && \
+              ../build_64.sh "$MNN_BASE_FLAGS" && \
+              make install
+            BUILD_RESULT=$?
+            echo "MA_NGUON_MNN_VULKAN=khong-vulkan-do-build-vulkan-loi" >> $GITHUB_ENV
+          fi
           set -e
 
           if [ $BUILD_RESULT -ne 0 ]; then
@@ -611,6 +632,12 @@ jobs:
             exit 1
           fi
           echo "OK: libMNN.so hop le tai $found_mnn ($(stat -c%s "$found_mnn" 2>/dev/null || stat -f%z "$found_mnn") byte)"
+          # MỤC CU: ghi nhận (KHÔNG làm hỏng build) xem libMNN.so này có mã backend Vulkan thật không — chạy cả khi cache TRÚNG,
+          # nên dòng này là bằng chứng đáng tin hơn biến MA_NGUON_MNN_VULKAN (biến đó chỉ có khi vừa build mới).
+          vk_hits=$(grep -a -c -i "VulkanBackend\|libvulkan.so" "$found_mnn" 2>/dev/null || true)
+          att_hits=$(grep -a -c "glsl_attention_kvcache_update" "$found_mnn" 2>/dev/null || true)
+          vk_hits=${vk_hits:-0}; att_hits=${att_hits:-0}
+          echo "[CU] libMNN.so: so dong khop 'VulkanBackend|libvulkan.so' = $vk_hits ; so dong khop shader attention Vulkan = $att_hits  (0 nghia la build KHONG co Vulkan LLM => nut 'Thu Vulkan' vo nghia)"
           # ĐÃ SỬA (2026-09-27, lỗi THẬT tự gây ra ở build #2) — đọc lại
           # đúng `android_native/app/src/main/cpp/CMakeLists.txt`: dòng
           # `if(MNN_LLM_LIB)` xác nhận file libllm.so/libMNN_llm.so RIÊNG
