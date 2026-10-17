@@ -442,12 +442,20 @@ jobs:
       - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.6.1 (khớp phiên bản công cụ đã xuất model, mục CE)
         run: git clone --depth 1 --branch 3.6.1 https://github.com/alibaba/MNN.git
 
+      # MỤC DB (2026-10-16) — SỬA KHÓA CACHE. Ảnh chụp Actions của người dùng cho thấy bước "Cache TRÚNG — bỏ qua biên dịch MNN" chạy còn bước
+      # "Build engine MNN native" bị bỏ qua (cả lượt 5m36s) dù bước clone đã ghim 3.6.1 ⇒ libMNN.so lấy từ cache, KHÔNG biên dịch lần này.
+      # Khóa cũ `mnn-build-v2-${{ hashFiles('build.yml') }}-…`: `hashFiles()` tính từ GỐC repo (GITHUB_WORKSPACE) và trả CHUỖI RỖNG nếu không
+      # khớp file nào (tài liệu GitHub). Workflow bắt buộc nằm ở `.github/workflows/` ⇒ `hashFiles('build.yml')` rất có thể rỗng ⇒ khóa không
+      # bao giờ đổi ⇒ cache build 3.5.0 cũ được khôi phục mãi dù đổi sang 3.6.1/Vulkan (đúng rủi ro chính file này đã tự ghi ở ghi chú phía trên).
+      # Khóa mới: (a) CHỮ cứng gồm tag + số v3 ⇒ chắc chắn là khóa MỚI (cache cũ bị bỏ), tăng v3→v4 tay mỗi khi đổi cờ CMake/bản MNN/QNN;
+      # (b) vẫn gồm hash các file workflow bằng mẫu `.github/workflows/*.yml` (khớp bất kể tên file) để tự làm mới khi sửa workflow.
+      # Ngoài ra bước "Cache TRÚNG" bên dưới còn so COMMIT của mã MNN vừa clone với dấu commit lưu cùng cache: lệch ⇒ bỏ cache, build lại.
       - name: Khôi phục cache thư viện MNN đã build sẵn (nếu có)
         id: cache-mnn-restore
         uses: actions/cache/restore@v4
         with:
           path: MNN/project/android/build_64
-          key: mnn-build-v2-${{ hashFiles('build.yml') }}-ndk-${{ env.ANDROID_NDK }}
+          key: mnn-build-3.6.1-v3-${{ hashFiles('.github/workflows/*.yml') }}-ndk-${{ env.ANDROID_NDK }}
 
       # ĐÃ THÊM (theo yêu cầu người dùng: "sao không tra cứu cách MNN/cộng
       # đồng giải quyết vấn đề" — tra cứu thật thì tìm được: changelog
@@ -554,16 +562,26 @@ jobs:
           echo "=== Xác nhận QnnInterface.h đã có đúng chỗ ==="
           find MNN/source/backend/qnn/3rdParty -name "QnnInterface.h"
 
-      - name: Cache TRÚNG — bỏ qua biên dịch MNN, dùng thẳng thư viện đã cache
+      - name: Cache TRÚNG — chỉ dùng nếu đúng commit MNN vừa clone, lệch thì bỏ cache để build lại
         if: steps.cache-mnn-restore.outputs.cache-hit == 'true'
         run: |
-          echo "=== Cache MNN TRÚNG (key khớp với lần build trước) — bỏ qua hẳn bước biên dịch C++ nặng ==="
-          echo "=== Xác nhận nhanh thư mục cache có .so thật, không rỗng/hỏng ==="
-          find MNN/project/android/build_64 -name "*.so" | head -20
-          echo "MA_NGUON_MNN_THAT_DUNG=tag-3.6.1-tu-cache-khong-bien-dich-lai" >> $GITHUB_ENV
+          echo "=== Cache MNN TRÚNG khóa — kiểm tra cache có đúng commit MNN đang clone không (mục DB) ==="
+          cached_commit=$(cat MNN/project/android/build_64/.mnn_commit 2>/dev/null || echo "KHONG_CO_DAU_COMMIT")
+          now_commit=$(git -C MNN rev-parse HEAD)
+          echo "commit MNN lúc build ra cache : $cached_commit"
+          echo "commit MNN vừa clone (tag 3.6.1): $now_commit"
+          if [ "$cached_commit" != "$now_commit" ]; then
+            echo "!!! CACHE CŨ/KHÔNG KHỚP COMMIT (hoặc cache từ trước khi có dấu commit) — BỎ cache, biên dịch lại MNN từ đầu."
+            rm -rf MNN/project/android/build_64
+            echo "MNN_CACHE_STALE=true" >> $GITHUB_ENV
+          else
+            echo "=== Cache khớp commit — bỏ qua biên dịch C++ nặng. Xác nhận nhanh có .so thật ==="
+            find MNN/project/android/build_64 -name "*.so" | head -20
+            echo "MA_NGUON_MNN_THAT_DUNG=tag-3.6.1-cache-khop-commit-$now_commit" >> $GITHUB_ENV
+          fi
 
       - name: Build engine MNN native (bật LLM + OpenCL GPU + QNN NPU)
-        if: steps.cache-mnn-restore.outputs.cache-hit != 'true'
+        if: steps.cache-mnn-restore.outputs.cache-hit != 'true' || env.MNN_CACHE_STALE == 'true'
         working-directory: MNN/project/android
         run: |
           # LỊCH SỬ (build #133, đã hết hiệu lực — xem mục BI ngay phía
@@ -644,10 +662,12 @@ jobs:
           found_mnn=$(find MNN/project/android/build_64 -name "libMNN.so" -size +1k | head -1)
           if [ -z "$found_mnn" ]; then
             echo "LOI THAT: khong tim thay libMNN.so hop le (thieu hoac qua nho, duoi 1KB) trong MNN/project/android/build_64"
-            echo "Neu day la nhanh CACHE TRUNG: cache dang HONG — vao GitHub repo > Settings > Actions > Caches, xoa cache co ten bat dau bang 'mnn-build-v2-' roi chay lai."
+            echo "Neu day la nhanh CACHE TRUNG: cache dang HONG — vao GitHub repo > Settings > Actions > Caches, xoa cache co ten bat dau bang 'mnn-build-' roi chay lai."
             exit 1
           fi
           echo "OK: libMNN.so hop le tai $found_mnn ($(stat -c%s "$found_mnn" 2>/dev/null || stat -f%z "$found_mnn") byte)"
+          # MỤC DB: dấu vân tay THẬT của libMNN.so sẽ vào APK (cả khi cache TRÚNG). Bản 3.5.0 cũ (build 01/10, mucCD) có size 7199064, CRC32 95d9a5cf.
+          echo "[DB] libMNN.so CRC32 / SHA256: $(python3 -c "import zlib,sys;print('%08x'%(zlib.crc32(open(sys.argv[1],'rb').read())&0xffffffff))" "$found_mnn" 2>/dev/null || echo '?') $(sha256sum "$found_mnn" 2>/dev/null | cut -d' ' -f1)"
           # MỤC CU: ghi nhận (KHÔNG làm hỏng build) xem libMNN.so này có mã backend Vulkan thật không — chạy cả khi cache TRÚNG,
           # nên dòng này là bằng chứng đáng tin hơn biến MA_NGUON_MNN_VULKAN (biến đó chỉ có khi vừa build mới).
           vk_hits=$(grep -a -c -i "VulkanBackend\|libvulkan.so" "$found_mnn" 2>/dev/null || true)
@@ -669,12 +689,16 @@ jobs:
             echo "OK: thu vien LLM rieng tai $found_llm ($(stat -c%s "$found_llm" 2>/dev/null || stat -f%z "$found_llm") byte)"
           fi
 
+      - name: Ghi dấu commit MNN vào thư mục cache (để lần sau kiểm cache có đúng commit không — mục DB)
+        if: steps.cache-mnn-restore.outputs.cache-hit != 'true' || env.MNN_CACHE_STALE == 'true'
+        run: git -C MNN rev-parse HEAD > MNN/project/android/build_64/.mnn_commit
+
       - name: Lưu cache thư viện MNN (CHỈ sau khi vừa build mới THÀNH CÔNG THẬT và đã xác nhận đủ file ở bước trên)
-        if: steps.cache-mnn-restore.outputs.cache-hit != 'true'
+        if: steps.cache-mnn-restore.outputs.cache-hit != 'true' || env.MNN_CACHE_STALE == 'true'
         uses: actions/cache/save@v4
         with:
           path: MNN/project/android/build_64
-          key: mnn-build-v2-${{ hashFiles('build.yml') }}-ndk-${{ env.ANDROID_NDK }}
+          key: mnn-build-3.6.1-v3-${{ hashFiles('.github/workflows/*.yml') }}-ndk-${{ env.ANDROID_NDK }}
 
       - name: Ghép code native (Kotlin + JNI) vào project Android
         run: |
@@ -875,9 +899,9 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-v1-${{ hashFiles('build.yml') }}
+          key: gradle-v2-${{ hashFiles('.github/workflows/*.yml') }}
           restore-keys: |
-            gradle-v1-
+            gradle-v2-
 
       - name: Build APK
         working-directory: scaffold
