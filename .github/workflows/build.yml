@@ -533,6 +533,28 @@ jobs:
           grep -n -E "mSampler|Sampler::|sampler->|sample\(" src/llm.cpp 2>/dev/null | head -40 || true
           exit 0
 
+      # MỤC DG (lần 2): log CI #27 cho thấy bộ lấy mẫu của MNN có Sampler::createSampler(mContext, mConfig), các bước stepTopK/stepTopP/stepMinP/stepTfs/
+      # stepTypical/stepLogitBias/stepBannedTokens/stepSelect và cấu hình mặc định ngram=8, ngram_factor=1.02, max_penalty=10, penalty_window=0.
+      # Phần log người dùng dán bị cụt (thiếu llm.hpp và nửa đầu sampler.cpp, nơi có logic phạt n-gram và cách gọi từng bước). Thay vì bắt copy chữ,
+      # đóng gói NGUYÊN các file nguồn liên quan (giấy phép Apache-2.0 của MNN) thành artifact để tải về rồi gửi lại — mình đọc đủ mã rồi mới viết bản vá.
+      - name: Gom mã nguồn Llm/Sampler của MNN để tải về (mục DG — chỉ copy, không đổi gì)
+        run: |
+          mkdir -p mnn_llm_sources
+          ENG=MNN/transformers/llm/engine
+          for f in $ENG/src/sampler.cpp $ENG/src/sampler.hpp $ENG/src/llm.cpp $ENG/src/llmconfig.hpp $ENG/include/llm/*.hpp $ENG/src/*.hpp; do
+            if [ -f "$f" ]; then cp -n "$f" mnn_llm_sources/ || true; fi
+          done
+          ls -la mnn_llm_sources
+          echo "tổng dung lượng:"; du -sh mnn_llm_sources
+          exit 0
+
+      - name: Tải lên artifact mnn_llm_sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn_llm_sources
+          path: mnn_llm_sources
+          if-no-files-found: warn
+
       - name: Vá demo TTS hỏng của MNN — thay nội dung bằng file rỗng (KHÔNG xoá, KHÔNG đụng CMakeLists)
         run: |
           BROKEN_DEMO="MNN/transformers/llm/engine/demo/qwen3_tts_demo.cpp"
