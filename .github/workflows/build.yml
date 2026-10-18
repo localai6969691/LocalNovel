@@ -514,6 +514,25 @@ jobs:
       # symbol nào từ audio) → không lỗi thiếu symbol. Chỉ tạo ra 1 file
       # thực thi demo TTS "rỗng, vô hại" mà app không bao giờ dùng tới —
       # không ảnh hưởng gì tới libMNN.so/libllm.so mà app thật sự cần.
+      # MỤC DG (2026-10-17) — CHỈ IN, không đổi gì. Để gắn DRY/XTC (thuật toán chống lặp/đa dạng cho văn xuôi mà MNN không có sẵn) vào đường sinh
+      # token một cách CHẮC CHẮN thay vì đoán API: in ra log CI giao diện công khai THẬT của `Llm` (forward/generate/sample/getContext/set_config...) và
+      # các lớp/hàm của bộ lấy mẫu (penalty/ngram/mixed) ở đúng commit MNN vừa clone. Người dùng gửi lại đoạn log này thì mới viết tích hợp được.
+      - name: In giao diện Llm và Sampler THẬT của MNN (để gắn DRY/XTC — mục DG, chỉ in)
+        run: |
+          cd MNN/transformers/llm/engine || { echo "không thấy thư mục engine"; exit 0; }
+          echo "=== file liên quan trong engine ==="
+          ls include/llm 2>/dev/null || true
+          ls src 2>/dev/null | grep -i -E "sampler|llm" || true
+          echo "=== khai báo công khai trong llm.hpp (forward/generate/sample/context/config/response/logits) ==="
+          grep -n -E "class Llm|struct LlmContext|forward|generate|sample|getContext|set_config|dump_config|response|reset\(|history_tokens|logits|Sampler|virtual" include/llm/llm.hpp || true
+          echo "=== bộ lấy mẫu: lớp/hàm, penalty, ngram, mixed ==="
+          for f in include/llm/sampler.hpp src/sampler.cpp include/llm/sampler.h src/sampler.hpp; do
+            if [ -f "$f" ]; then echo "--- $f"; grep -n -E "class |struct |virtual |penalty|ngram|n_gram|mixed|logits|Sampler::|window" "$f" | head -120; fi
+          done
+          echo "=== nơi llm.cpp gọi sampler ==="
+          grep -n -E "mSampler|Sampler::|sampler->|sample\(" src/llm.cpp 2>/dev/null | head -40 || true
+          exit 0
+
       - name: Vá demo TTS hỏng của MNN — thay nội dung bằng file rỗng (KHÔNG xoá, KHÔNG đụng CMakeLists)
         run: |
           BROKEN_DEMO="MNN/transformers/llm/engine/demo/qwen3_tts_demo.cpp"
