@@ -455,7 +455,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: MNN/project/android/build_64
-          key: mnn-build-3.6.1-v3-${{ hashFiles('.github/workflows/*.yml') }}-ndk-${{ env.ANDROID_NDK }}
+          key: mnn-build-3.6.1-v4-${{ hashFiles('.github/workflows/*.yml', 'extracted/local_novel/tools/mnn_patches/apply_story_sampler_patch.py') }}-ndk-${{ env.ANDROID_NDK }}
 
       # ĐÃ THÊM (theo yêu cầu người dùng: "sao không tra cứu cách MNN/cộng
       # đồng giải quyết vấn đề" — tra cứu thật thì tìm được: changelog
@@ -554,6 +554,16 @@ jobs:
           name: mnn_llm_sources
           path: mnn_llm_sources
           if-no-files-found: warn
+
+      # MỤC DG (lần 3): ÁP bản vá bộ lấy mẫu truyện vào MNN — thêm DRY + XTC và khoá "live_sampler" (cho phép set_config dựng lại sampler). Viết trên mã THẬT của
+      # tag 3.6.1 (người dùng đã tải artifact mnn_llm_sources) và đã biên dịch + chạy 8 nhóm kiểm thử trên chính sampler.cpp/hpp đã vá (tools/mnn_patches/test).
+      # Hành vi mặc định KHÔNG đổi: dry_multiplier=0, xtc_probability=0, live_sampler=false. Neo không khớp => script dừng với lỗi rõ (không vá bừa).
+      # Khoá cache MNN ở trên đã gồm hash của script này nên đổi script sẽ tự biên dịch lại MNN.
+      - name: Áp bản vá bộ lấy mẫu truyện (DRY/XTC/live_sampler) vào MNN — mục DG
+        run: |
+          python3 extracted/local_novel/tools/mnn_patches/apply_story_sampler_patch.py MNN/transformers/llm/engine
+          echo "=== git diff --stat (bản vá đã áp lên MNN) ==="
+          git -C MNN diff --stat
 
       - name: Vá demo TTS hỏng của MNN — thay nội dung bằng file rỗng (KHÔNG xoá, KHÔNG đụng CMakeLists)
         run: |
@@ -739,7 +749,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: MNN/project/android/build_64
-          key: mnn-build-3.6.1-v3-${{ hashFiles('.github/workflows/*.yml') }}-ndk-${{ env.ANDROID_NDK }}
+          key: mnn-build-3.6.1-v4-${{ hashFiles('.github/workflows/*.yml', 'extracted/local_novel/tools/mnn_patches/apply_story_sampler_patch.py') }}-ndk-${{ env.ANDROID_NDK }}
 
       - name: Ghép code native (Kotlin + JNI) vào project Android
         run: |
