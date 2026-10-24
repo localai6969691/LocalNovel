@@ -3,6 +3,10 @@ on: workflow_dispatch
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # MỤC DM (2026-10-24) — NƠI DUY NHẤT khai báo phiên bản MNN để build runtime (tag, nhánh hoặc commit đầy đủ). Bước clone và bước ghi nguồn gốc
+      # (assets/mnn_runtime.json) đều đọc biến này; notebook convert KHÔNG tự gõ phiên bản riêng nữa mà lấy commit thật do APK báo (dòng [DM] trong log app).
+      MNN_REF: "3.6.1"
     steps:
       - uses: actions/checkout@v4
 
@@ -457,8 +461,8 @@ jobs:
       # (đọc bằng native, CRC khớp Java) chứa chuỗi phiên bản "3.6.1" ở cuối file => model do công cụ MNN 3.6.1 xuất.
       # Runtime 3.5.0 (APK build trước) từ chối đúng file đó (verify FlatBuffers) dù bộ verify của chính thư viện hoạt động
       # (net tự tạo đọc lại thành công). Runtime phải CÙNG HOẶC MỚI HƠN công cụ đã xuất model => dùng đúng tag 3.6.1.
-      - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM tag 3.6.1 (khớp phiên bản công cụ đã xuất model, mục CE)
-        run: git clone --depth 1 --branch 3.6.1 https://github.com/alibaba/MNN.git
+      - name: Clone mã nguồn chính thức MNN (Alibaba) — GHIM theo MNN_REF (khai báo ở đầu job; mục CE, DM)
+        run: git clone --depth 1 --branch "$MNN_REF" https://github.com/alibaba/MNN.git
 
       # MỤC DB (2026-10-16) — SỬA KHÓA CACHE. Ảnh chụp Actions của người dùng cho thấy bước "Cache TRÚNG — bỏ qua biên dịch MNN" chạy còn bước
       # "Build engine MNN native" bị bỏ qua (cả lượt 5m36s) dù bước clone đã ghim 3.6.1 ⇒ libMNN.so lấy từ cache, KHÔNG biên dịch lần này.
@@ -768,6 +772,42 @@ jobs:
         with:
           path: MNN/project/android/build_64
           key: mnn-build-3.6.1-v4-${{ hashFiles('.github/workflows/*.yml', 'extracted/local_novel/tools/mnn_patches/apply_story_sampler_patch.py') }}-ndk-${{ env.ANDROID_NDK }}
+
+      # MỤC DM (2026-10-24) — GHI NGUỒN GỐC THẬT của runtime MNN vào APK. Chạy LUÔN (cache trúng hay build mới, kể cả khi bước build lùi về master dự phòng) vì chỉ đọc
+      # cây `MNN/` đang đứng. Từ đây app biết commit MNN nào nằm trong nó và so được với commit đã xuất model (notebook ghi localnovel_export_info.json).
+      # `source` nói thẳng có đúng bản yêu cầu (MNN_REF) hay không — nhánh dự phòng master HEAD từng im lặng thay bản mà không ai biết.
+      - name: Ghi nguồn gốc runtime MNN vào APK (assets/mnn_runtime.json) — mục DM
+        run: |
+          set -e
+          commit=$(git -C MNN rev-parse HEAD)
+          exact_tag=$(git -C MNN describe --tags --exact-match HEAD 2>/dev/null || echo "")
+          MNN_COMMIT="$commit" MNN_EXACT_TAG="$exact_tag" python3 - <<'PY'
+          import datetime, json, os, re
+          ref = os.environ.get("MNN_REF", "")
+          commit = os.environ["MNN_COMMIT"]
+          tag = os.environ.get("MNN_EXACT_TAG", "")
+          txt = open("MNN/include/MNN/MNNDefine.h", encoding="utf-8", errors="ignore").read()
+          parts = [re.search(r"#define\s+MNN_VERSION_" + k + r"\s+(\d+)", txt) for k in ("MAJOR", "MINOR", "PATCH")]
+          ver = ".".join(p.group(1) for p in parts) if all(parts) else ""
+          ok = (tag == ref) or (commit == ref)
+          info = {
+              "schema": 1,
+              "requested_ref": ref,
+              "commit": commit,
+              "exact_tag": tag,
+              "version_header": ver,
+              "source": "dung-ban-yeu-cau" if ok else "KHAC-ban-yeu-cau (co the la master du phong)",
+              "built_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }
+          os.makedirs("scaffold/assets", exist_ok=True)
+          out = "scaffold/assets/mnn_runtime.json"
+          json.dump(info, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+          json.load(open(out, encoding="utf-8"))
+          print("[DM] nguon goc runtime MNN:", json.dumps(info, ensure_ascii=False))
+          if not ok:
+              print("!!! [DM] CANH BAO: cay MNN dang build KHONG phai ban yeu cau MNN_REF=%s (tag hien tai='%s', commit=%s)." % (ref, tag, commit))
+          PY
+          test -s scaffold/assets/mnn_runtime.json
 
       - name: Ghép code native (Kotlin + JNI) vào project Android
         run: |
